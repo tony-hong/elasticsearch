@@ -19,14 +19,17 @@
 
 package org.elasticsearch.percolator;
 
-import com.fasterxml.jackson.core.JsonParseException;
+import org.apache.lucene.analysis.Analyzer;
+import org.apache.lucene.analysis.core.WhitespaceAnalyzer;
+import org.apache.lucene.search.BooleanClause;
+import org.apache.lucene.search.BooleanQuery;
+import org.apache.lucene.search.IndexSearcher;
+import org.apache.lucene.search.MatchAllDocsQuery;
 import org.apache.lucene.search.Query;
-import org.elasticsearch.ElasticsearchParseException;
 import org.elasticsearch.ResourceNotFoundException;
 import org.elasticsearch.action.admin.indices.mapping.put.PutMappingRequest;
 import org.elasticsearch.action.get.GetRequest;
 import org.elasticsearch.action.get.GetResponse;
-import org.elasticsearch.common.ParsingException;
 import org.elasticsearch.common.bytes.BytesArray;
 import org.elasticsearch.common.bytes.BytesReference;
 import org.elasticsearch.common.compress.CompressedXContent;
@@ -34,21 +37,24 @@ import org.elasticsearch.common.xcontent.XContentBuilder;
 import org.elasticsearch.common.xcontent.XContentFactory;
 import org.elasticsearch.index.get.GetResult;
 import org.elasticsearch.index.mapper.MapperService;
-import org.elasticsearch.plugins.Plugin;
-import org.elasticsearch.test.AbstractQueryTestCase;
+import org.elasticsearch.index.mapper.ParseContext;
+import org.elasticsearch.index.mapper.ParsedDocument;
 import org.elasticsearch.index.query.QueryBuilder;
-import org.elasticsearch.index.query.QueryShardContext;
 import org.elasticsearch.ingest.RandomDocumentPicks;
-import org.elasticsearch.script.Script;
+import org.elasticsearch.plugins.Plugin;
+import org.elasticsearch.search.internal.SearchContext;
+import org.elasticsearch.test.AbstractQueryTestCase;
 import org.hamcrest.Matchers;
-import org.junit.BeforeClass;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.List;
+import java.util.Set;
 
-import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.sameInstance;
 
 public class PercolateQueryBuilderTests extends AbstractQueryTestCase<PercolateQueryBuilder> {
 
@@ -65,7 +71,7 @@ public class PercolateQueryBuilderTests extends AbstractQueryTestCase<PercolateQ
     private Long indexedDocumentVersion;
     private BytesReference documentSource;
 
-    boolean indexedDocumentExists = true;
+    private boolean indexedDocumentExists = true;
 
     @Override
     protected Collection<Class<? extends Plugin>> getPlugins() {
@@ -136,7 +142,7 @@ public class PercolateQueryBuilderTests extends AbstractQueryTestCase<PercolateQ
     }
 
     @Override
-    protected void doAssertLuceneQuery(PercolateQueryBuilder queryBuilder, Query query, QueryShardContext context) throws IOException {
+    protected void doAssertLuceneQuery(PercolateQueryBuilder queryBuilder, Query query, SearchContext context) throws IOException {
         assertThat(query, Matchers.instanceOf(PercolateQuery.class));
         PercolateQuery percolateQuery = (PercolateQuery) query;
         assertThat(percolateQuery.getDocumentType(), Matchers.equalTo(queryBuilder.getDocumentType()));
@@ -162,31 +168,10 @@ public class PercolateQueryBuilderTests extends AbstractQueryTestCase<PercolateQ
         assertThat(e.getMessage() , equalTo(expectedString));
     }
 
-    // overwrite this test, because adding bogus field to the document part is valid and that would make the test fail
-    // (the document part represents the document being percolated and any key value pair is allowed there)
     @Override
-    public void testUnknownObjectException() throws IOException {
-        String validQuery = createTestQueryBuilder().toString();
-        int endPos = validQuery.indexOf("document");
-        if (endPos == -1) {
-            endPos = validQuery.length();
-        }
-        assertThat(validQuery, containsString("{"));
-        for (int insertionPosition = 0; insertionPosition < endPos; insertionPosition++) {
-            if (validQuery.charAt(insertionPosition) == '{') {
-                String testQuery = validQuery.substring(0, insertionPosition) + "{ \"newField\" : " +
-                        validQuery.substring(insertionPosition) + "}";
-                try {
-                    parseQuery(testQuery);
-                    fail("some parsing exception expected for query: " + testQuery);
-                } catch (ParsingException | Script.ScriptParseException | ElasticsearchParseException e) {
-                    // different kinds of exception wordings depending on location
-                    // of mutation, so no simple asserts possible here
-                } catch (JsonParseException e) {
-                    // mutation produced invalid json
-                }
-            }
-        }
+    protected Set<String> getObjectsHoldingArbitraryContent() {
+        //document contains arbitrary content, no error expected when an object is added to it
+        return Collections.singleton(PercolateQueryBuilder.DOCUMENT_FIELD.getPreferredName());
     }
 
     public void testRequiredParameters() {
@@ -233,6 +218,27 @@ public class PercolateQueryBuilderTests extends AbstractQueryTestCase<PercolateQ
         assertThat(e.getMessage(), equalTo("[percolate] query is missing required [document_type] parameter"));
     }
 
+    public void testCreateMultiDocumentSearcher() throws Exception {
+        int numDocs = randomIntBetween(2, 8);
+        List<ParseContext.Document> docs = new ArrayList<>(numDocs);
+        for (int i = 0; i < numDocs; i++) {
+            docs.add(new ParseContext.Document());
+        }
+
+        Analyzer analyzer = new WhitespaceAnalyzer();
+        ParsedDocument parsedDocument = new ParsedDocument(null, null, "_id", "_type", null, docs, null, null);
+        IndexSearcher indexSearcher = PercolateQueryBuilder.createMultiDocumentSearcher(analyzer, parsedDocument);
+        assertThat(indexSearcher.getIndexReader().numDocs(), equalTo(numDocs));
+
+        // ensure that any query get modified so that the nested docs are never included as hits:
+        Query query = new MatchAllDocsQuery();
+        BooleanQuery result = (BooleanQuery) indexSearcher.createNormalizedWeight(query, true).getQuery();
+        assertThat(result.clauses().size(), equalTo(2));
+        assertThat(result.clauses().get(0).getQuery(), sameInstance(query));
+        assertThat(result.clauses().get(0).getOccur(), equalTo(BooleanClause.Occur.MUST));
+        assertThat(result.clauses().get(1).getOccur(), equalTo(BooleanClause.Occur.MUST_NOT));
+    }
+
     private static BytesReference randomSource() {
         try {
             XContentBuilder xContent = XContentFactory.jsonBuilder();
@@ -241,5 +247,10 @@ public class PercolateQueryBuilderTests extends AbstractQueryTestCase<PercolateQ
         } catch (IOException e) {
             throw new RuntimeException(e);
         }
+    }
+
+    @Override
+    protected boolean isCachable(PercolateQueryBuilder queryBuilder) {
+        return false;
     }
 }

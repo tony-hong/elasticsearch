@@ -21,22 +21,21 @@ package org.elasticsearch.index.reindex;
 
 import org.elasticsearch.action.Action;
 import org.elasticsearch.action.ActionRequestBuilder;
-import org.elasticsearch.action.ActionResponse;
-import org.elasticsearch.action.WriteConsistencyLevel;
 import org.elasticsearch.action.search.SearchRequestBuilder;
+import org.elasticsearch.action.support.ActiveShardCount;
+import org.elasticsearch.action.support.replication.ReplicationRequest;
 import org.elasticsearch.client.ElasticsearchClient;
 import org.elasticsearch.common.unit.TimeValue;
 import org.elasticsearch.index.query.QueryBuilder;
 
 public abstract class AbstractBulkByScrollRequestBuilder<
                 Request extends AbstractBulkByScrollRequest<Request>,
-                Response extends ActionResponse,
-                Self extends AbstractBulkByScrollRequestBuilder<Request, Response, Self>>
-        extends ActionRequestBuilder<Request, Response, Self> {
+                Self extends AbstractBulkByScrollRequestBuilder<Request, Self>>
+        extends ActionRequestBuilder<Request, BulkIndexByScrollResponse, Self> {
     private final SearchRequestBuilder source;
 
     protected AbstractBulkByScrollRequestBuilder(ElasticsearchClient client,
-            Action<Request, Response, Self> action, SearchRequestBuilder source, Request request) {
+            Action<Request, BulkIndexByScrollResponse, Self> action, SearchRequestBuilder source, Request request) {
         super(client, action, request);
         this.source = source;
     }
@@ -100,10 +99,11 @@ public abstract class AbstractBulkByScrollRequestBuilder<
     }
 
     /**
-     * Consistency level for write requests.
+     * The number of shard copies that must be active before proceeding with the write.
+     * See {@link ReplicationRequest#waitForActiveShards(ActiveShardCount)} for details.
      */
-    public Self consistency(WriteConsistencyLevel consistency) {
-        request.setConsistency(consistency);
+    public Self waitForActiveShards(ActiveShardCount activeShardCount) {
+        request.setWaitForActiveShards(activeShardCount);
         return self();
     }
 
@@ -131,6 +131,22 @@ public abstract class AbstractBulkByScrollRequestBuilder<
      */
     public Self setRequestsPerSecond(float requestsPerSecond) {
         request.setRequestsPerSecond(requestsPerSecond);
+        return self();
+    }
+
+    /**
+     * Should this task store its result after it has finished?
+     */
+    public Self setShouldStoreResult(boolean shouldStoreResult) {
+        request.setShouldStoreResult(shouldStoreResult);
+        return self();
+    }
+
+    /**
+     * The number of slices this task should be divided into. Defaults to 1 meaning the task isn't sliced into subtasks.
+     */
+    public Self setSlices(int workers) {
+        request.setSlices(workers);
         return self();
     }
 }

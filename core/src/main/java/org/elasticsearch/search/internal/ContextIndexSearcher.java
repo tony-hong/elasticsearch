@@ -122,7 +122,7 @@ public class ContextIndexSearcher extends IndexSearcher implements Releasable {
                 weight = super.createWeight(query, needsScores);
             } finally {
                 profile.stopAndRecordTime();
-                profiler.pollLastQuery();
+                profiler.pollLastElement();
             }
             return new ProfileWeight(query, weight, profile);
         } else {
@@ -133,6 +133,10 @@ public class ContextIndexSearcher extends IndexSearcher implements Releasable {
 
     @Override
     public Explanation explain(Query query, int doc) throws IOException {
+        if (aggregatedDfs != null) {
+            // dfs data is needed to explain the score
+            return super.explain(createNormalizedWeight(query, true), doc);
+        }
         return in.explain(query, doc);
     }
 

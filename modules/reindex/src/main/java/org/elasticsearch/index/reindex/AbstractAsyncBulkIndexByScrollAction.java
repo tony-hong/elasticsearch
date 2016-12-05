@@ -19,36 +19,32 @@
 
 package org.elasticsearch.index.reindex;
 
+import org.apache.logging.log4j.Logger;
 import org.elasticsearch.action.ActionListener;
-import org.elasticsearch.action.ActionRequest;
+import org.elasticsearch.action.DocWriteRequest;
 import org.elasticsearch.action.bulk.BulkRequest;
 import org.elasticsearch.action.delete.DeleteRequest;
 import org.elasticsearch.action.index.IndexRequest;
-import org.elasticsearch.action.search.SearchRequest;
 import org.elasticsearch.client.ParentTaskAssigningClient;
 import org.elasticsearch.cluster.ClusterState;
-import org.elasticsearch.common.logging.ESLogger;
-import org.elasticsearch.common.unit.TimeValue;
 import org.elasticsearch.index.VersionType;
-import org.elasticsearch.index.mapper.internal.IdFieldMapper;
-import org.elasticsearch.index.mapper.internal.IndexFieldMapper;
-import org.elasticsearch.index.mapper.internal.ParentFieldMapper;
-import org.elasticsearch.index.mapper.internal.RoutingFieldMapper;
-import org.elasticsearch.index.mapper.internal.SourceFieldMapper;
-import org.elasticsearch.index.mapper.internal.TTLFieldMapper;
-import org.elasticsearch.index.mapper.internal.TimestampFieldMapper;
-import org.elasticsearch.index.mapper.internal.TypeFieldMapper;
-import org.elasticsearch.index.mapper.internal.VersionFieldMapper;
+import org.elasticsearch.index.mapper.IdFieldMapper;
+import org.elasticsearch.index.mapper.IndexFieldMapper;
+import org.elasticsearch.index.mapper.ParentFieldMapper;
+import org.elasticsearch.index.mapper.RoutingFieldMapper;
+import org.elasticsearch.index.mapper.SourceFieldMapper;
+import org.elasticsearch.index.mapper.TypeFieldMapper;
+import org.elasticsearch.index.mapper.VersionFieldMapper;
 import org.elasticsearch.script.CompiledScript;
 import org.elasticsearch.script.ExecutableScript;
 import org.elasticsearch.script.Script;
 import org.elasticsearch.script.ScriptContext;
 import org.elasticsearch.script.ScriptService;
-import org.elasticsearch.search.SearchHit;
-import org.elasticsearch.search.SearchHitField;
 import org.elasticsearch.threadpool.ThreadPool;
 
+import java.util.Arrays;
 import java.util.HashMap;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.function.BiFunction;
@@ -70,13 +66,13 @@ public abstract class AbstractAsyncBulkIndexByScrollAction<Request extends Abstr
      * from copying search hit metadata (parent, routing, etc) to potentially transforming the
      * {@link RequestWrapper} completely.
      */
-    private final BiFunction<RequestWrapper<?>, SearchHit, RequestWrapper<?>> scriptApplier;
+    private final BiFunction<RequestWrapper<?>, ScrollableHitSource.Hit, RequestWrapper<?>> scriptApplier;
 
-    public AbstractAsyncBulkIndexByScrollAction(BulkByScrollTask task, ESLogger logger, ParentTaskAssigningClient client,
-                                                ThreadPool threadPool, Request mainRequest, SearchRequest firstSearchRequest,
+    public AbstractAsyncBulkIndexByScrollAction(WorkingBulkByScrollTask task, Logger logger, ParentTaskAssigningClient client,
+                                                ThreadPool threadPool, Request mainRequest,
                                                 ActionListener<BulkIndexByScrollResponse> listener,
                                                 ScriptService scriptService, ClusterState clusterState) {
-        super(task, logger, client, threadPool, mainRequest, firstSearchRequest, listener);
+        super(task, logger, client, threadPool, mainRequest, listener);
         this.scriptService = scriptService;
         this.clusterState = clusterState;
         this.scriptApplier = Objects.requireNonNull(buildScriptApplier(), "script applier must not be null");
@@ -85,15 +81,15 @@ public abstract class AbstractAsyncBulkIndexByScrollAction<Request extends Abstr
     /**
      * Build the {@link BiFunction} to apply to all {@link RequestWrapper}.
      */
-    protected BiFunction<RequestWrapper<?>, SearchHit, RequestWrapper<?>> buildScriptApplier() {
+    protected BiFunction<RequestWrapper<?>, ScrollableHitSource.Hit, RequestWrapper<?>> buildScriptApplier() {
         // The default script applier executes a no-op
         return (request, searchHit) -> request;
     }
 
     @Override
-    protected BulkRequest buildBulk(Iterable<SearchHit> docs) {
+    protected BulkRequest buildBulk(Iterable<? extends ScrollableHitSource.Hit> docs) {
         BulkRequest bulkRequest = new BulkRequest();
-        for (SearchHit doc : docs) {
+        for (ScrollableHitSource.Hit doc : docs) {
             if (accept(doc)) {
                 RequestWrapper<?> request = scriptApplier.apply(copyMetadata(buildRequest(doc), doc), doc);
                 if (request != null) {
@@ -109,14 +105,14 @@ public abstract class AbstractAsyncBulkIndexByScrollAction<Request extends Abstr
      * from the bulk request. It is also where we fail on invalid search hits, like
      * when the document has no source but it's required.
      */
-    protected boolean accept(SearchHit doc) {
-        if (doc.hasSource()) {
+    protected boolean accept(ScrollableHitSource.Hit doc) {
+        if (doc.getSource() == null) {
             /*
              * Either the document didn't store _source or we didn't fetch it for some reason. Since we don't allow the user to
              * change the "fields" part of the search request it is unlikely that we got here because we didn't fetch _source.
              * Thus the error message assumes that it wasn't stored.
              */
-            throw new IllegalArgumentException("[" + doc.index() + "][" + doc.type() + "][" + doc.id() + "] didn't store _source");
+            throw new IllegalArgumentException("[" + doc.getIndex() + "][" + doc.getType() + "][" + doc.getId() + "] didn't store _source");
         }
         return true;
     }
@@ -126,32 +122,15 @@ public abstract class AbstractAsyncBulkIndexByScrollAction<Request extends Abstr
      * metadata or scripting. That will be handled by copyMetadata and
      * apply functions that can be overridden.
      */
-    protected abstract RequestWrapper<?> buildRequest(SearchHit doc);
+    protected abstract RequestWrapper<?> buildRequest(ScrollableHitSource.Hit doc);
 
     /**
      * Copies the metadata from a hit to the request.
      */
-    protected RequestWrapper<?> copyMetadata(RequestWrapper<?> request, SearchHit doc) {
-        copyParent(request, fieldValue(doc, ParentFieldMapper.NAME));
-        copyRouting(request, fieldValue(doc, RoutingFieldMapper.NAME));
-
-        // Comes back as a Long but needs to be a string
-        Long timestamp = fieldValue(doc, TimestampFieldMapper.NAME);
-        if (timestamp != null) {
-            request.setTimestamp(timestamp.toString());
-        }
-        Long ttl = fieldValue(doc, TTLFieldMapper.NAME);
-        if (ttl != null) {
-            request.setTtl(ttl);
-        }
+    protected RequestWrapper<?> copyMetadata(RequestWrapper<?> request, ScrollableHitSource.Hit doc) {
+        request.setParent(doc.getParent());
+        copyRouting(request, doc.getRouting());
         return request;
-    }
-
-    /**
-     * Copy the parent from a search hit to the request.
-     */
-    protected void copyParent(RequestWrapper<?> request, String parent) {
-        request.setParent(parent);
     }
 
     /**
@@ -161,33 +140,36 @@ public abstract class AbstractAsyncBulkIndexByScrollAction<Request extends Abstr
         request.setRouting(routing);
     }
 
-    protected <T> T fieldValue(SearchHit doc, String fieldName) {
-        SearchHitField field = doc.field(fieldName);
-        return field == null ? null : field.value();
-    }
-
     /**
-     * Wrapper for the {@link ActionRequest} that are used in this action class.
+     * Wrapper for the {@link DocWriteRequest} that are used in this action class.
      */
-    interface RequestWrapper<Self extends ActionRequest<Self>> {
+    interface RequestWrapper<Self extends DocWriteRequest<Self>> {
 
         void setIndex(String index);
 
+        String getIndex();
+
         void setType(String type);
+
+        String getType();
 
         void setId(String id);
 
+        String getId();
+
         void setVersion(long version);
+
+        long getVersion();
 
         void setVersionType(VersionType versionType);
 
         void setParent(String parent);
 
+        String getParent();
+
         void setRouting(String routing);
 
-        void setTimestamp(String timestamp);
-
-        void setTtl(Long ttl);
+        String getRouting();
 
         void setSource(Map<String, Object> source);
 
@@ -213,8 +195,18 @@ public abstract class AbstractAsyncBulkIndexByScrollAction<Request extends Abstr
         }
 
         @Override
+        public String getIndex() {
+            return request.index();
+        }
+
+        @Override
         public void setType(String type) {
             request.type(type);
+        }
+
+        @Override
+        public String getType() {
+            return request.type();
         }
 
         @Override
@@ -223,8 +215,18 @@ public abstract class AbstractAsyncBulkIndexByScrollAction<Request extends Abstr
         }
 
         @Override
+        public String getId() {
+            return request.id();
+        }
+
+        @Override
         public void setVersion(long version) {
             request.version(version);
+        }
+
+        @Override
+        public long getVersion() {
+            return request.version();
         }
 
         @Override
@@ -238,22 +240,18 @@ public abstract class AbstractAsyncBulkIndexByScrollAction<Request extends Abstr
         }
 
         @Override
+        public String getParent() {
+            return request.parent();
+        }
+
+        @Override
         public void setRouting(String routing) {
             request.routing(routing);
         }
 
         @Override
-        public void setTimestamp(String timestamp) {
-            request.timestamp(timestamp);
-        }
-
-        @Override
-        public void setTtl(Long ttl) {
-            if (ttl == null) {
-                request.ttl((TimeValue) null);
-            } else {
-                request.ttl(ttl);
-            }
+        public String getRouting() {
+            return request.routing();
         }
 
         @Override
@@ -296,8 +294,18 @@ public abstract class AbstractAsyncBulkIndexByScrollAction<Request extends Abstr
         }
 
         @Override
+        public String getIndex() {
+            return request.index();
+        }
+
+        @Override
         public void setType(String type) {
             request.type(type);
+        }
+
+        @Override
+        public String getType() {
+            return request.type();
         }
 
         @Override
@@ -306,8 +314,18 @@ public abstract class AbstractAsyncBulkIndexByScrollAction<Request extends Abstr
         }
 
         @Override
+        public String getId() {
+            return request.id();
+        }
+
+        @Override
         public void setVersion(long version) {
             request.version(version);
+        }
+
+        @Override
+        public long getVersion() {
+            return request.version();
         }
 
         @Override
@@ -321,18 +339,18 @@ public abstract class AbstractAsyncBulkIndexByScrollAction<Request extends Abstr
         }
 
         @Override
+        public String getParent() {
+            return request.parent();
+        }
+
+        @Override
         public void setRouting(String routing) {
             request.routing(routing);
         }
 
         @Override
-        public void setTimestamp(String timestamp) {
-            throw new UnsupportedOperationException("unable to set [timestamp] on action request [" + request.getClass() + "]");
-        }
-
-        @Override
-        public void setTtl(Long ttl) {
-            throw new UnsupportedOperationException("unable to set [ttl] on action request [" + request.getClass() + "]");
+        public String getRouting() {
+            return request.routing();
         }
 
         @Override
@@ -361,69 +379,61 @@ public abstract class AbstractAsyncBulkIndexByScrollAction<Request extends Abstr
     /**
      * Apply a {@link Script} to a {@link RequestWrapper}
      */
-    public abstract class ScriptApplier implements BiFunction<RequestWrapper<?>, SearchHit, RequestWrapper<?>> {
+    public abstract class ScriptApplier implements BiFunction<RequestWrapper<?>, ScrollableHitSource.Hit, RequestWrapper<?>> {
 
-        private final BulkByScrollTask task;
+        private final WorkingBulkByScrollTask task;
         private final ScriptService scriptService;
-        private final ClusterState state;
         private final Script script;
         private final Map<String, Object> params;
 
         private ExecutableScript executable;
         private Map<String, Object> context;
 
-        public ScriptApplier(BulkByScrollTask task, ScriptService scriptService, Script script, ClusterState state,
+        public ScriptApplier(WorkingBulkByScrollTask task, ScriptService scriptService, Script script,
                              Map<String, Object> params) {
             this.task = task;
             this.scriptService = scriptService;
             this.script = script;
-            this.state = state;
             this.params = params;
         }
 
         @Override
         @SuppressWarnings("unchecked")
-        public RequestWrapper<?> apply(RequestWrapper<?> request, SearchHit doc) {
+        public RequestWrapper<?> apply(RequestWrapper<?> request, ScrollableHitSource.Hit doc) {
             if (script == null) {
                 return request;
             }
             if (executable == null) {
-                CompiledScript compiled = scriptService.compile(script, ScriptContext.Standard.UPDATE, emptyMap(), state);
+                CompiledScript compiled = scriptService.compile(script, ScriptContext.Standard.UPDATE, emptyMap());
                 executable = scriptService.executable(compiled, params);
             }
             if (context == null) {
                 context = new HashMap<>();
+            } else {
+                context.clear();
             }
 
-            context.put(IndexFieldMapper.NAME, doc.index());
-            context.put(TypeFieldMapper.NAME, doc.type());
-            context.put(IdFieldMapper.NAME, doc.id());
+            context.put(IndexFieldMapper.NAME, doc.getIndex());
+            context.put(TypeFieldMapper.NAME, doc.getType());
+            context.put(IdFieldMapper.NAME, doc.getId());
             Long oldVersion = doc.getVersion();
             context.put(VersionFieldMapper.NAME, oldVersion);
-            String oldParent = fieldValue(doc, ParentFieldMapper.NAME);
+            String oldParent = doc.getParent();
             context.put(ParentFieldMapper.NAME, oldParent);
-            String oldRouting = fieldValue(doc, RoutingFieldMapper.NAME);
+            String oldRouting = doc.getRouting();
             context.put(RoutingFieldMapper.NAME, oldRouting);
-            Long oldTimestamp = fieldValue(doc, TimestampFieldMapper.NAME);
-            context.put(TimestampFieldMapper.NAME, oldTimestamp);
-            Long oldTTL = fieldValue(doc, TTLFieldMapper.NAME);
-            context.put(TTLFieldMapper.NAME, oldTTL);
             context.put(SourceFieldMapper.NAME, request.getSource());
-            context.put("op", "update");
+
+            OpType oldOpType = OpType.INDEX;
+            context.put("op", oldOpType.toString());
+
             executable.setNextVar("ctx", context);
             executable.run();
 
             Map<String, Object> resultCtx = (Map<String, Object>) executable.unwrap(context);
             String newOp = (String) resultCtx.remove("op");
             if (newOp == null) {
-                throw new IllegalArgumentException("Script cleared op!");
-            }
-            if ("noop".equals(newOp)) {
-                task.countNoop();
-                return null;
-            }
-            if (false == "update".equals(newOp)) {
-                throw new IllegalArgumentException("Invalid op [" + newOp + ']');
+                throw new IllegalArgumentException("Script cleared operation type");
             }
 
             /*
@@ -432,23 +442,23 @@ public abstract class AbstractAsyncBulkIndexByScrollAction<Request extends Abstr
              */
             request.setSource((Map<String, Object>) resultCtx.remove(SourceFieldMapper.NAME));
 
-            Object newValue = context.remove(IndexFieldMapper.NAME);
-            if (false == doc.index().equals(newValue)) {
+            Object newValue = resultCtx.remove(IndexFieldMapper.NAME);
+            if (false == doc.getIndex().equals(newValue)) {
                 scriptChangedIndex(request, newValue);
             }
-            newValue = context.remove(TypeFieldMapper.NAME);
-            if (false == doc.type().equals(newValue)) {
+            newValue = resultCtx.remove(TypeFieldMapper.NAME);
+            if (false == doc.getType().equals(newValue)) {
                 scriptChangedType(request, newValue);
             }
-            newValue = context.remove(IdFieldMapper.NAME);
-            if (false == doc.id().equals(newValue)) {
+            newValue = resultCtx.remove(IdFieldMapper.NAME);
+            if (false == doc.getId().equals(newValue)) {
                 scriptChangedId(request, newValue);
             }
-            newValue = context.remove(VersionFieldMapper.NAME);
+            newValue = resultCtx.remove(VersionFieldMapper.NAME);
             if (false == Objects.equals(oldVersion, newValue)) {
                 scriptChangedVersion(request, newValue);
             }
-            newValue = context.remove(ParentFieldMapper.NAME);
+            newValue = resultCtx.remove(ParentFieldMapper.NAME);
             if (false == Objects.equals(oldParent, newValue)) {
                 scriptChangedParent(request, newValue);
             }
@@ -456,22 +466,37 @@ public abstract class AbstractAsyncBulkIndexByScrollAction<Request extends Abstr
              * Its important that routing comes after parent in case you want to
              * change them both.
              */
-            newValue = context.remove(RoutingFieldMapper.NAME);
+            newValue = resultCtx.remove(RoutingFieldMapper.NAME);
             if (false == Objects.equals(oldRouting, newValue)) {
                 scriptChangedRouting(request, newValue);
             }
-            newValue = context.remove(TimestampFieldMapper.NAME);
-            if (false == Objects.equals(oldTimestamp, newValue)) {
-                scriptChangedTimestamp(request, newValue);
+
+            OpType newOpType = OpType.fromString(newOp);
+            if (newOpType != oldOpType) {
+                return scriptChangedOpType(request, oldOpType, newOpType);
             }
-            newValue = context.remove(TTLFieldMapper.NAME);
-            if (false == Objects.equals(oldTTL, newValue)) {
-                scriptChangedTTL(request, newValue);
-            }
-            if (false == context.isEmpty()) {
-                throw new IllegalArgumentException("Invalid fields added to context [" + String.join(",", context.keySet()) + ']');
+
+            if (false == resultCtx.isEmpty()) {
+                throw new IllegalArgumentException("Invalid fields added to context [" + String.join(",", resultCtx.keySet()) + ']');
             }
             return request;
+        }
+
+        protected RequestWrapper<?> scriptChangedOpType(RequestWrapper<?> request, OpType oldOpType, OpType newOpType) {
+            switch (newOpType) {
+            case NOOP:
+                task.countNoop();
+                return null;
+            case DELETE:
+                RequestWrapper<DeleteRequest> delete = wrap(new DeleteRequest(request.getIndex(), request.getType(), request.getId()));
+                delete.setVersion(request.getVersion());
+                delete.setVersionType(VersionType.INTERNAL);
+                delete.setParent(request.getParent());
+                delete.setRouting(request.getRouting());
+                return delete;
+            default:
+                throw new IllegalArgumentException("Unsupported operation type change from [" + oldOpType + "] to [" + newOpType + "]");
+            }
         }
 
         protected abstract void scriptChangedIndex(RequestWrapper<?> request, Object to);
@@ -486,8 +511,38 @@ public abstract class AbstractAsyncBulkIndexByScrollAction<Request extends Abstr
 
         protected abstract void scriptChangedParent(RequestWrapper<?> request, Object to);
 
-        protected abstract void scriptChangedTimestamp(RequestWrapper<?> request, Object to);
+    }
 
-        protected abstract void scriptChangedTTL(RequestWrapper<?> request, Object to);
+    public enum OpType {
+
+        NOOP("noop"),
+        INDEX("index"),
+        DELETE("delete");
+
+        private final String id;
+
+        OpType(String id) {
+            this.id = id;
+        }
+
+        public static OpType fromString(String opType) {
+            String lowerOpType = opType.toLowerCase(Locale.ROOT);
+            switch (lowerOpType) {
+                case "noop":
+                    return OpType.NOOP;
+                case "index":
+                    return OpType.INDEX;
+                case "delete":
+                    return OpType.DELETE;
+                default:
+                    throw new IllegalArgumentException("Operation type [" + lowerOpType + "] not allowed, only " +
+                            Arrays.toString(values()) + " are allowed");
+            }
+        }
+
+        @Override
+        public String toString() {
+            return id.toLowerCase(Locale.ROOT);
+        }
     }
 }

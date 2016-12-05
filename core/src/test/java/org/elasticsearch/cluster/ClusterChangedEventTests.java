@@ -20,6 +20,7 @@
 package org.elasticsearch.cluster;
 
 import com.carrotsearch.hppc.cursors.ObjectCursor;
+import com.carrotsearch.hppc.cursors.ObjectObjectCursor;
 import org.elasticsearch.Version;
 import org.elasticsearch.cluster.block.ClusterBlocks;
 import org.elasticsearch.cluster.metadata.IndexGraveyard;
@@ -30,10 +31,10 @@ import org.elasticsearch.cluster.node.DiscoveryNodes;
 import org.elasticsearch.cluster.routing.RoutingTable;
 import org.elasticsearch.common.UUIDs;
 import org.elasticsearch.common.settings.Settings;
-import org.elasticsearch.common.transport.DummyTransportAddress;
 import org.elasticsearch.gateway.GatewayService;
 import org.elasticsearch.index.Index;
 import org.elasticsearch.test.ESTestCase;
+import org.elasticsearch.test.TestCustomMetaData;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -140,24 +141,24 @@ public class ClusterChangedEventTests extends ESTestCase {
      */
     public void testIndexMetaDataChange() {
         final int numNodesInCluster = 3;
-        final ClusterState originalState = createState(numNodesInCluster, randomBoolean(), initialIndices);
-        final ClusterState newState = originalState; // doesn't matter for this test, just need a non-null value
-        final ClusterChangedEvent event = new ClusterChangedEvent("_na_", originalState, newState);
+        final ClusterState state = createState(numNodesInCluster, randomBoolean(), initialIndices);
 
         // test when its not the same IndexMetaData
         final Index index = initialIndices.get(0);
-        final IndexMetaData originalIndexMeta = originalState.metaData().index(index);
+        final IndexMetaData originalIndexMeta = state.metaData().index(index);
         // make sure the metadata is actually on the cluster state
         assertNotNull("IndexMetaData for " + index + " should exist on the cluster state", originalIndexMeta);
         IndexMetaData newIndexMeta = createIndexMetadata(index, originalIndexMeta.getVersion() + 1);
-        assertTrue("IndexMetaData with different version numbers must be considered changed", event.indexMetaDataChanged(newIndexMeta));
+        assertTrue("IndexMetaData with different version numbers must be considered changed",
+            ClusterChangedEvent.indexMetaDataChanged(originalIndexMeta, newIndexMeta));
 
         // test when it doesn't exist
         newIndexMeta = createIndexMetadata(new Index("doesntexist", UUIDs.randomBase64UUID()));
-        assertTrue("IndexMetaData that didn't previously exist should be considered changed", event.indexMetaDataChanged(newIndexMeta));
+        assertTrue("IndexMetaData that didn't previously exist should be considered changed",
+            ClusterChangedEvent.indexMetaDataChanged(originalIndexMeta, newIndexMeta));
 
         // test when its the same IndexMetaData
-        assertFalse("IndexMetaData should be the same", event.indexMetaDataChanged(originalIndexMeta));
+        assertFalse("IndexMetaData should be the same", ClusterChangedEvent.indexMetaDataChanged(originalIndexMeta, originalIndexMeta));
     }
 
     /**
@@ -223,6 +224,128 @@ public class ClusterChangedEventTests extends ESTestCase {
         assertTrue("index routing table should not be the same object", event.indexRoutingTableChanged(initialIndices.get(0).getName()));
     }
 
+    /**
+     * Test custom metadata change checks
+     */
+    public void testChangedCustomMetaDataSet() {
+        final int numNodesInCluster = 3;
+
+        final ClusterState originalState = createState(numNodesInCluster, randomBoolean(), initialIndices);
+        CustomMetaData1 customMetaData1 = new CustomMetaData1("data");
+        final ClusterState stateWithCustomMetaData = nextState(originalState, Collections.singletonList(customMetaData1));
+
+        // no custom metadata present in any state
+        ClusterState nextState = ClusterState.builder(originalState).build();
+        ClusterChangedEvent event = new ClusterChangedEvent("_na_", originalState, nextState);
+        assertTrue(event.changedCustomMetaDataSet().isEmpty());
+
+        // next state has new custom metadata
+        nextState = nextState(originalState, Collections.singletonList(customMetaData1));
+        event = new ClusterChangedEvent("_na_", originalState, nextState);
+        Set<String> changedCustomMetaDataTypeSet = event.changedCustomMetaDataSet();
+        assertTrue(changedCustomMetaDataTypeSet.size() == 1);
+        assertTrue(changedCustomMetaDataTypeSet.contains(customMetaData1.type()));
+
+        // next state has same custom metadata
+        nextState = nextState(originalState, Collections.singletonList(customMetaData1));
+        event = new ClusterChangedEvent("_na_", stateWithCustomMetaData, nextState);
+        changedCustomMetaDataTypeSet = event.changedCustomMetaDataSet();
+        assertTrue(changedCustomMetaDataTypeSet.isEmpty());
+
+        // next state has equivalent custom metadata
+        nextState = nextState(originalState, Collections.singletonList(new CustomMetaData1("data")));
+        event = new ClusterChangedEvent("_na_", stateWithCustomMetaData, nextState);
+        changedCustomMetaDataTypeSet = event.changedCustomMetaDataSet();
+        assertTrue(changedCustomMetaDataTypeSet.isEmpty());
+
+        // next state removes custom metadata
+        nextState = originalState;
+        event = new ClusterChangedEvent("_na_", stateWithCustomMetaData, nextState);
+        changedCustomMetaDataTypeSet = event.changedCustomMetaDataSet();
+        assertTrue(changedCustomMetaDataTypeSet.size() == 1);
+        assertTrue(changedCustomMetaDataTypeSet.contains(customMetaData1.type()));
+
+        // next state updates custom metadata
+        nextState = nextState(stateWithCustomMetaData, Collections.singletonList(new CustomMetaData1("data1")));
+        event = new ClusterChangedEvent("_na_", stateWithCustomMetaData, nextState);
+        changedCustomMetaDataTypeSet = event.changedCustomMetaDataSet();
+        assertTrue(changedCustomMetaDataTypeSet.size() == 1);
+        assertTrue(changedCustomMetaDataTypeSet.contains(customMetaData1.type()));
+
+        // next state adds new custom metadata type
+        CustomMetaData2 customMetaData2 = new CustomMetaData2("data2");
+        nextState = nextState(stateWithCustomMetaData, Arrays.asList(customMetaData1, customMetaData2));
+        event = new ClusterChangedEvent("_na_", stateWithCustomMetaData, nextState);
+        changedCustomMetaDataTypeSet = event.changedCustomMetaDataSet();
+        assertTrue(changedCustomMetaDataTypeSet.size() == 1);
+        assertTrue(changedCustomMetaDataTypeSet.contains(customMetaData2.type()));
+
+        // next state adds two custom metadata type
+        nextState = nextState(originalState, Arrays.asList(customMetaData1, customMetaData2));
+        event = new ClusterChangedEvent("_na_", originalState, nextState);
+        changedCustomMetaDataTypeSet = event.changedCustomMetaDataSet();
+        assertTrue(changedCustomMetaDataTypeSet.size() == 2);
+        assertTrue(changedCustomMetaDataTypeSet.contains(customMetaData2.type()));
+        assertTrue(changedCustomMetaDataTypeSet.contains(customMetaData1.type()));
+
+        // next state removes two custom metadata type
+        nextState = originalState;
+        event = new ClusterChangedEvent("_na_",
+                nextState(originalState, Arrays.asList(customMetaData1, customMetaData2)), nextState);
+        changedCustomMetaDataTypeSet = event.changedCustomMetaDataSet();
+        assertTrue(changedCustomMetaDataTypeSet.size() == 2);
+        assertTrue(changedCustomMetaDataTypeSet.contains(customMetaData2.type()));
+        assertTrue(changedCustomMetaDataTypeSet.contains(customMetaData1.type()));
+    }
+
+    private static class CustomMetaData2 extends TestCustomMetaData {
+        static {
+            MetaData.registerPrototype("2", new CustomMetaData2(""));
+        }
+        protected CustomMetaData2(String data) {
+            super(data);
+        }
+
+        @Override
+        protected TestCustomMetaData newTestCustomMetaData(String data) {
+            return new CustomMetaData2(data);
+        }
+
+        @Override
+        public String type() {
+            return "2";
+        }
+
+        @Override
+        public EnumSet<MetaData.XContentContext> context() {
+            return EnumSet.of(MetaData.XContentContext.GATEWAY);
+        }
+    }
+
+    private static class CustomMetaData1 extends TestCustomMetaData {
+        static {
+            MetaData.registerPrototype("1", new CustomMetaData1(""));
+        }
+        protected CustomMetaData1(String data) {
+            super(data);
+        }
+
+        @Override
+        protected TestCustomMetaData newTestCustomMetaData(String data) {
+            return new CustomMetaData1(data);
+        }
+
+        @Override
+        public String type() {
+            return "1";
+        }
+
+        @Override
+        public EnumSet<MetaData.XContentContext> context() {
+            return EnumSet.of(MetaData.XContentContext.GATEWAY);
+        }
+    }
+
     private static ClusterState createSimpleClusterState() {
         return ClusterState.builder(TEST_CLUSTER_NAME).build();
     }
@@ -243,6 +366,22 @@ public class ClusterChangedEventTests extends ESTestCase {
         return ClusterState.builder(withoutBlock)
                            .blocks(ClusterBlocks.builder().addGlobalBlock(GatewayService.STATE_NOT_RECOVERED_BLOCK).build())
                            .build();
+    }
+
+    private static ClusterState nextState(final ClusterState previousState, List<TestCustomMetaData> customMetaDataList) {
+        final ClusterState.Builder builder = ClusterState.builder(previousState);
+        builder.stateUUID(UUIDs.randomBase64UUID());
+        MetaData.Builder metaDataBuilder = new MetaData.Builder(previousState.metaData());
+        for (ObjectObjectCursor<String, MetaData.Custom> customMetaData : previousState.metaData().customs()) {
+            if (customMetaData.value instanceof TestCustomMetaData) {
+                metaDataBuilder.removeCustom(customMetaData.key);
+            }
+        }
+        for (TestCustomMetaData testCustomMetaData : customMetaDataList) {
+            metaDataBuilder.putCustom(testCustomMetaData.type(), testCustomMetaData);
+        }
+        builder.metaData(metaDataBuilder);
+        return builder.build();
     }
 
     // Create a modified cluster state from another one, but with some number of indices added and deleted.
@@ -310,7 +449,7 @@ public class ClusterChangedEventTests extends ESTestCase {
                 }
             }
             final DiscoveryNode node = newNode(nodeId, roles);
-            builder.put(node);
+            builder.add(node);
             if (i == localNodeIndex) {
                 builder.localNodeId(nodeId);
             }
@@ -320,7 +459,8 @@ public class ClusterChangedEventTests extends ESTestCase {
 
     // Create a new DiscoveryNode
     private static DiscoveryNode newNode(final String nodeId, Set<DiscoveryNode.Role> roles) {
-        return new DiscoveryNode(nodeId, nodeId, DummyTransportAddress.INSTANCE, Collections.emptyMap(), roles, Version.CURRENT);
+        return new DiscoveryNode(nodeId, nodeId, nodeId, "host", "host_address", buildNewFakeTransportAddress(),
+            Collections.emptyMap(), roles, Version.CURRENT);
     }
 
     // Create the metadata for a cluster state.

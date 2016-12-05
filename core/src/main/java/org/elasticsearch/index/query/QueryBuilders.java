@@ -27,16 +27,12 @@ import org.elasticsearch.common.geo.builders.ShapeBuilder;
 import org.elasticsearch.index.query.MoreLikeThisQueryBuilder.Item;
 import org.elasticsearch.index.query.functionscore.FunctionScoreQueryBuilder;
 import org.elasticsearch.index.query.functionscore.ScoreFunctionBuilder;
-import org.elasticsearch.index.search.MatchQuery;
 import org.elasticsearch.indices.TermsLookup;
 import org.elasticsearch.script.Script;
-import org.elasticsearch.script.ScriptService;
-import org.elasticsearch.script.Template;
 
 import java.io.IOException;
 import java.util.Collection;
 import java.util.List;
-import java.util.Map;
 
 /**
  * A static factory for simple "import static" usage.
@@ -57,7 +53,7 @@ public abstract class QueryBuilders {
      * @param text The query text (to be analyzed).
      */
     public static MatchQueryBuilder matchQuery(String name, Object text) {
-        return new MatchQueryBuilder(name, text).type(MatchQuery.Type.BOOLEAN);
+        return new MatchQueryBuilder(name, text);
     }
 
     /**
@@ -86,8 +82,8 @@ public abstract class QueryBuilders {
      * @param name The field name.
      * @param text The query text (to be analyzed).
      */
-    public static MatchQueryBuilder matchPhraseQuery(String name, Object text) {
-        return new MatchQueryBuilder(name, text).type(MatchQuery.Type.PHRASE);
+    public static MatchPhraseQueryBuilder matchPhraseQuery(String name, Object text) {
+        return new MatchPhraseQueryBuilder(name, text);
     }
 
     /**
@@ -96,8 +92,8 @@ public abstract class QueryBuilders {
      * @param name The field name.
      * @param text The query text (to be analyzed).
      */
-    public static MatchQueryBuilder matchPhrasePrefixQuery(String name, Object text) {
-        return new MatchQueryBuilder(name, text).type(MatchQuery.Type.PHRASE_PREFIX);
+    public static MatchPhrasePrefixQueryBuilder matchPhrasePrefixQuery(String name, Object text) {
+        return new MatchPhrasePrefixQueryBuilder(name, text);
     }
 
     /**
@@ -122,7 +118,7 @@ public abstract class QueryBuilders {
      * @param types The mapping/doc type
      */
     public static IdsQueryBuilder idsQuery(String... types) {
-        return new IdsQueryBuilder(types);
+        return new IdsQueryBuilder().types(types);
     }
 
     /**
@@ -590,18 +586,6 @@ public abstract class QueryBuilders {
     }
 
     /**
-     * A query that will execute the wrapped query only for the specified
-     * indices, and "match_all" when it does not match those indices.
-     *
-     * @deprecated instead search on the `_index` field
-     */
-    @Deprecated
-    public static IndicesQueryBuilder indicesQuery(QueryBuilder queryBuilder, String... indices) {
-        // TODO remove this method in 6.0
-        return new IndicesQueryBuilder(queryBuilder, indices);
-    }
-
-    /**
      * A Query builder which allows building a query thanks to a JSON string or binary data.
      */
     public static WrapperQueryBuilder wrapperQuery(String source) {
@@ -620,27 +604,6 @@ public abstract class QueryBuilders {
      */
     public static WrapperQueryBuilder wrapperQuery(byte[] source) {
         return new WrapperQueryBuilder(source);
-    }
-
-    /**
-     * Facilitates creating template query requests using an inline script
-     */
-    public static TemplateQueryBuilder templateQuery(Template template) {
-        return new TemplateQueryBuilder(template);
-    }
-
-    /**
-     * Facilitates creating template query requests using an inline script
-     */
-    public static TemplateQueryBuilder templateQuery(String template, Map<String, Object> vars) {
-        return new TemplateQueryBuilder(new Template(template, ScriptService.ScriptType.INLINE, null, null, vars));
-    }
-
-    /**
-     * Facilitates creating template query requests
-     */
-    public static TemplateQueryBuilder templateQuery(String template, ScriptService.ScriptType templateType, Map<String, Object> vars) {
-        return new TemplateQueryBuilder(new Template(template, templateType, null, null, vars));
     }
 
     /**
@@ -677,80 +640,12 @@ public abstract class QueryBuilders {
     }
 
     /**
-     * A filter to filter based on a specific range from a specific geo location / point.
-     *
-     * @param name The location field name.
-     * @param point The point
-     */
-    public static GeoDistanceRangeQueryBuilder geoDistanceRangeQuery(String name, GeoPoint point) {
-        return new GeoDistanceRangeQueryBuilder(name, point);
-    }
-
-    /**
-     * A filter to filter based on a specific range from a specific geo location / point.
-     *
-     * @param name The location field name.
-     * @param geohash The point as geohash
-     */
-    public static GeoDistanceRangeQueryBuilder geoDistanceRangeQuery(String name, String geohash) {
-        return new GeoDistanceRangeQueryBuilder(name, geohash);
-    }
-
-    /**
-     * A filter to filter based on a specific range from a specific geo location / point.
-     *
-     * @param name The location field name.
-     * @param lat The points latitude
-     * @param lon The points longitude
-     */
-    public static GeoDistanceRangeQueryBuilder geoDistanceRangeQuery(String name, double lat, double lon) {
-        return new GeoDistanceRangeQueryBuilder(name, lat, lon);
-    }
-
-    /**
      * A filter to filter based on a bounding box defined by top left and bottom right locations / points
      *
      * @param name The location field name.
      */
     public static GeoBoundingBoxQueryBuilder geoBoundingBoxQuery(String name) {
         return new GeoBoundingBoxQueryBuilder(name);
-    }
-
-    /**
-     * A filter based on a bounding box defined by geohash. The field this filter is applied to
-     * must have <code>{&quot;type&quot;:&quot;geo_point&quot;, &quot;geohash&quot;:true}</code>
-     * to work.
-     *
-     * @param name The geo point field name.
-     * @param geohash The Geohash to filter
-     */
-    public static GeohashCellQuery.Builder geoHashCellQuery(String name, String geohash) {
-        return new GeohashCellQuery.Builder(name, geohash);
-    }
-
-    /**
-     * A filter based on a bounding box defined by geohash. The field this filter is applied to
-     * must have <code>{&quot;type&quot;:&quot;geo_point&quot;, &quot;geohash&quot;:true}</code>
-     * to work.
-     *
-     * @param name The geo point field name.
-     * @param point a geo point within the geohash bucket
-     */
-    public static GeohashCellQuery.Builder geoHashCellQuery(String name, GeoPoint point) {
-        return new GeohashCellQuery.Builder(name, point);
-    }
-
-    /**
-     * A filter based on a bounding box defined by geohash. The field this filter is applied to
-     * must have <code>{&quot;type&quot;:&quot;geo_point&quot;, &quot;geohash&quot;:true}</code>
-     * to work.
-     *
-     * @param name The geo point field name
-     * @param geohash The Geohash to filter
-     * @param neighbors should the neighbor cell also be filtered
-     */
-    public static GeohashCellQuery.Builder geoHashCellQuery(String name, String geohash, boolean neighbors) {
-        return new GeohashCellQuery.Builder(name, geohash, neighbors);
     }
 
     /**

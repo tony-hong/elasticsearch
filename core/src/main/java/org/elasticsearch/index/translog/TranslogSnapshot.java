@@ -26,7 +26,8 @@ import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.file.Path;
 
-public class TranslogSnapshot extends BaseTranslogReader implements Translog.Snapshot {
+final class TranslogSnapshot extends BaseTranslogReader implements Translog.Snapshot {
+
     private final int totalOperations;
     protected final long length;
 
@@ -34,7 +35,6 @@ public class TranslogSnapshot extends BaseTranslogReader implements Translog.Sna
     private long position;
     private int readOperations;
     private BufferedChecksumStreamInput reuse;
-
 
     /**
      * Create a snapshot of translog file channel. The length parameter should be consistent with totalOperations and point
@@ -51,7 +51,7 @@ public class TranslogSnapshot extends BaseTranslogReader implements Translog.Sna
     }
 
     @Override
-    public final int totalOperations() {
+    public int totalOperations() {
         return totalOperations;
     }
 
@@ -64,7 +64,7 @@ public class TranslogSnapshot extends BaseTranslogReader implements Translog.Sna
         }
     }
 
-    protected final Translog.Operation readOperation() throws IOException {
+    protected Translog.Operation readOperation() throws IOException {
         final int opSize = readSize(reusableBuffer, position);
         reuse = checksummedStream(reusableBuffer, position, opSize, reuse);
         Translog.Operation op = read(reuse);
@@ -72,7 +72,6 @@ public class TranslogSnapshot extends BaseTranslogReader implements Translog.Sna
         readOperations++;
         return op;
     }
-
 
     public long sizeInBytes() {
         return length;
@@ -101,4 +100,5 @@ public class TranslogSnapshot extends BaseTranslogReader implements Translog.Sna
                 ", reusableBuffer=" + reusableBuffer +
                 '}';
     }
+
 }

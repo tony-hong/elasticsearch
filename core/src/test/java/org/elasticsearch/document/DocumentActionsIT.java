@@ -28,13 +28,16 @@ import org.elasticsearch.action.delete.DeleteResponse;
 import org.elasticsearch.action.get.GetResponse;
 import org.elasticsearch.action.index.IndexResponse;
 import org.elasticsearch.action.search.SearchResponse;
+import org.elasticsearch.action.support.WriteRequest.RefreshPolicy;
 import org.elasticsearch.cluster.health.ClusterHealthStatus;
 import org.elasticsearch.common.xcontent.XContentBuilder;
 import org.elasticsearch.common.xcontent.XContentFactory;
 import org.elasticsearch.test.ESIntegTestCase;
+import org.elasticsearch.test.hamcrest.ElasticsearchAssertions;
 
 import java.io.IOException;
 
+import static org.elasticsearch.action.DocWriteRequest.OpType;
 import static org.elasticsearch.client.Requests.clearIndicesCacheRequest;
 import static org.elasticsearch.client.Requests.getRequest;
 import static org.elasticsearch.client.Requests.indexRequest;
@@ -45,11 +48,11 @@ import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.nullValue;
 
 /**
- *
+ * Integration test for document action like index, bulk, and get. It has a very long history: it was in the second commit of Elasticsearch.
  */
 public class DocumentActionsIT extends ESIntegTestCase {
     protected void createIndex() {
-        createIndex(getConcreteIndexName());
+        ElasticsearchAssertions.assertAcked(prepareCreate(getConcreteIndexName()).addMapping("type1", "name", "type=keyword,store=true"));
     }
 
     protected String getConcreteIndexName() {
@@ -62,7 +65,8 @@ public class DocumentActionsIT extends ESIntegTestCase {
         logger.info("Running Cluster Health");
         ensureGreen();
         logger.info("Indexing [type1/1]");
-        IndexResponse indexResponse = client().prepareIndex().setIndex("test").setType("type1").setId("1").setSource(source("1", "test")).setRefresh(true).execute().actionGet();
+        IndexResponse indexResponse = client().prepareIndex().setIndex("test").setType("type1").setId("1").setSource(source("1", "test"))
+                .setRefreshPolicy(RefreshPolicy.IMMEDIATE).get();
         assertThat(indexResponse.getIndex(), equalTo(getConcreteIndexName()));
         assertThat(indexResponse.getId(), equalTo("1"));
         assertThat(indexResponse.getType(), equalTo("type1"));
@@ -100,7 +104,7 @@ public class DocumentActionsIT extends ESIntegTestCase {
 
         logger.info("Get [type1/1] with script");
         for (int i = 0; i < 5; i++) {
-            getResult = client().prepareGet("test", "type1", "1").setFields("name").execute().actionGet();
+            getResult = client().prepareGet("test", "type1", "1").setStoredFields("name").execute().actionGet();
             assertThat(getResult.getIndex(), equalTo(getConcreteIndexName()));
             assertThat(getResult.isExists(), equalTo(true));
             assertThat(getResult.getSourceAsBytes(), nullValue());
@@ -188,31 +192,31 @@ public class DocumentActionsIT extends ESIntegTestCase {
         assertThat(bulkResponse.getItems().length, equalTo(5));
 
         assertThat(bulkResponse.getItems()[0].isFailed(), equalTo(false));
-        assertThat(bulkResponse.getItems()[0].getOpType(), equalTo("index"));
+        assertThat(bulkResponse.getItems()[0].getOpType(), equalTo(OpType.INDEX));
         assertThat(bulkResponse.getItems()[0].getIndex(), equalTo(getConcreteIndexName()));
         assertThat(bulkResponse.getItems()[0].getType(), equalTo("type1"));
         assertThat(bulkResponse.getItems()[0].getId(), equalTo("1"));
 
         assertThat(bulkResponse.getItems()[1].isFailed(), equalTo(false));
-        assertThat(bulkResponse.getItems()[1].getOpType(), equalTo("create"));
+        assertThat(bulkResponse.getItems()[1].getOpType(), equalTo(OpType.CREATE));
         assertThat(bulkResponse.getItems()[1].getIndex(), equalTo(getConcreteIndexName()));
         assertThat(bulkResponse.getItems()[1].getType(), equalTo("type1"));
         assertThat(bulkResponse.getItems()[1].getId(), equalTo("2"));
 
         assertThat(bulkResponse.getItems()[2].isFailed(), equalTo(false));
-        assertThat(bulkResponse.getItems()[2].getOpType(), equalTo("index"));
+        assertThat(bulkResponse.getItems()[2].getOpType(), equalTo(OpType.INDEX));
         assertThat(bulkResponse.getItems()[2].getIndex(), equalTo(getConcreteIndexName()));
         assertThat(bulkResponse.getItems()[2].getType(), equalTo("type1"));
         String generatedId3 = bulkResponse.getItems()[2].getId();
 
         assertThat(bulkResponse.getItems()[3].isFailed(), equalTo(false));
-        assertThat(bulkResponse.getItems()[3].getOpType(), equalTo("delete"));
+        assertThat(bulkResponse.getItems()[3].getOpType(), equalTo(OpType.DELETE));
         assertThat(bulkResponse.getItems()[3].getIndex(), equalTo(getConcreteIndexName()));
         assertThat(bulkResponse.getItems()[3].getType(), equalTo("type1"));
         assertThat(bulkResponse.getItems()[3].getId(), equalTo("1"));
 
         assertThat(bulkResponse.getItems()[4].isFailed(), equalTo(true));
-        assertThat(bulkResponse.getItems()[4].getOpType(), equalTo("index"));
+        assertThat(bulkResponse.getItems()[4].getOpType(), equalTo(OpType.INDEX));
         assertThat(bulkResponse.getItems()[4].getIndex(), equalTo(getConcreteIndexName()));
         assertThat(bulkResponse.getItems()[4].getType(), equalTo("type1"));
 

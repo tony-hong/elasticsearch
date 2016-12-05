@@ -48,13 +48,10 @@ import static org.hamcrest.Matchers.arrayWithSize;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.notNullValue;
 
-/**
- *
- */
 public class PercolatorAggregationsIT extends ESIntegTestCase {
 
-    private final static String INDEX_NAME = "queries";
-    private final static String TYPE_NAME = "query";
+    private static final String INDEX_NAME = "queries";
+    private static final String TYPE_NAME = "query";
 
     @Override
     protected Collection<Class<? extends Plugin>> nodePlugins() {

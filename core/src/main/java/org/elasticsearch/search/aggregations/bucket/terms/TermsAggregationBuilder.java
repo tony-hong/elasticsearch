@@ -22,9 +22,11 @@ import org.elasticsearch.common.ParseField;
 import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.io.stream.StreamOutput;
 import org.elasticsearch.common.xcontent.XContentBuilder;
-import org.elasticsearch.search.aggregations.AggregatorFactory;
 import org.elasticsearch.search.aggregations.Aggregator.SubAggCollectionMode;
 import org.elasticsearch.search.aggregations.AggregatorFactories.Builder;
+import org.elasticsearch.search.aggregations.AggregatorFactory;
+import org.elasticsearch.search.aggregations.InternalAggregation;
+import org.elasticsearch.search.aggregations.InternalAggregation.Type;
 import org.elasticsearch.search.aggregations.bucket.terms.TermsAggregator.BucketCountThresholds;
 import org.elasticsearch.search.aggregations.bucket.terms.support.IncludeExclude;
 import org.elasticsearch.search.aggregations.support.AggregationContext;
@@ -34,13 +36,14 @@ import org.elasticsearch.search.aggregations.support.ValuesSourceAggregationBuil
 import org.elasticsearch.search.aggregations.support.ValuesSourceAggregatorFactory;
 import org.elasticsearch.search.aggregations.support.ValuesSourceConfig;
 import org.elasticsearch.search.aggregations.support.ValuesSourceType;
+
 import java.io.IOException;
 import java.util.List;
 import java.util.Objects;
 
 public class TermsAggregationBuilder extends ValuesSourceAggregationBuilder<ValuesSource, TermsAggregationBuilder> {
-    public static final String NAME = StringTerms.TYPE.name();
-    public static final ParseField AGGREGATION_NAME_FIELD = new ParseField(NAME);
+    public static final String NAME = "terms";
+    private static final InternalAggregation.Type TYPE = new Type("terms");
 
     public static final ParseField EXECUTION_HINT_FIELD_NAME = new ParseField("execution_hint");
     public static final ParseField SHARD_SIZE_FIELD_NAME = new ParseField("shard_size");
@@ -56,22 +59,22 @@ public class TermsAggregationBuilder extends ValuesSourceAggregationBuilder<Valu
     private Terms.Order order = Terms.Order.compound(Terms.Order.count(false), Terms.Order.term(true));
     private IncludeExclude includeExclude = null;
     private String executionHint = null;
-    private SubAggCollectionMode collectMode = SubAggCollectionMode.DEPTH_FIRST;
+    private SubAggCollectionMode collectMode = null;
     private TermsAggregator.BucketCountThresholds bucketCountThresholds = new TermsAggregator.BucketCountThresholds(
             DEFAULT_BUCKET_COUNT_THRESHOLDS);
     private boolean showTermDocCountError = false;
 
     public TermsAggregationBuilder(String name, ValueType valueType) {
-        super(name, StringTerms.TYPE, ValuesSourceType.ANY, valueType);
+        super(name, TYPE, ValuesSourceType.ANY, valueType);
     }
 
     /**
      * Read from a stream.
      */
     public TermsAggregationBuilder(StreamInput in) throws IOException {
-        super(in, StringTerms.TYPE, ValuesSourceType.ANY);
+        super(in, TYPE, ValuesSourceType.ANY);
         bucketCountThresholds = new BucketCountThresholds(in);
-        collectMode = SubAggCollectionMode.readFromStream(in);
+        collectMode = in.readOptionalWriteable(SubAggCollectionMode::readFromStream);
         executionHint = in.readOptionalString();
         includeExclude = in.readOptionalWriteable(IncludeExclude::new);
         order = InternalOrder.Streams.readOrder(in);
@@ -86,7 +89,7 @@ public class TermsAggregationBuilder extends ValuesSourceAggregationBuilder<Valu
     @Override
     protected void innerWriteTo(StreamOutput out) throws IOException {
         bucketCountThresholds.writeTo(out);
-        collectMode.writeTo(out);
+        out.writeOptionalWriteable(collectMode);
         out.writeOptionalString(executionHint);
         out.writeOptionalWriteable(includeExclude);
         InternalOrder.Streams.writeOrder(order, out);
@@ -110,8 +113,8 @@ public class TermsAggregationBuilder extends ValuesSourceAggregationBuilder<Valu
      * (defaults to 10)
      */
     public TermsAggregationBuilder size(int size) {
-        if (size < 0) {
-            throw new IllegalArgumentException("[size] must be greater than or equal to 0. Found [" + size + "] in [" + name + "]");
+        if (size <= 0) {
+            throw new IllegalArgumentException("[size] must be greater than 0. Found [" + size + "] in [" + name + "]");
         }
         bucketCountThresholds.setRequiredSize(size);
         return this;
@@ -124,9 +127,9 @@ public class TermsAggregationBuilder extends ValuesSourceAggregationBuilder<Valu
      * results are.
      */
     public TermsAggregationBuilder shardSize(int shardSize) {
-        if (shardSize < 0) {
+        if (shardSize <= 0) {
             throw new IllegalArgumentException(
-                    "[shardSize] must be greater than or equal to 0. Found [" + shardSize + "] in [" + name + "]");
+                    "[shardSize] must be greater than 0. Found [" + shardSize + "] in [" + name + "]");
         }
         bucketCountThresholds.setShardSize(shardSize);
         return this;
@@ -266,7 +269,9 @@ public class TermsAggregationBuilder extends ValuesSourceAggregationBuilder<Valu
         }
         builder.field(ORDER_FIELD.getPreferredName());
         order.toXContent(builder, params);
-        builder.field(SubAggCollectionMode.KEY.getPreferredName(), collectMode.parseField().getPreferredName());
+        if (collectMode != null) {
+            builder.field(SubAggCollectionMode.KEY.getPreferredName(), collectMode.parseField().getPreferredName());
+        }
         if (includeExclude != null) {
             includeExclude.toXContent(builder, params);
         }

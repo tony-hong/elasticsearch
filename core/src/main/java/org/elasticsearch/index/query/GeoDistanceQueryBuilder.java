@@ -19,10 +19,9 @@
 
 package org.elasticsearch.index.query;
 
+import org.apache.lucene.document.LatLonPoint;
 import org.apache.lucene.search.MatchNoDocsQuery;
 import org.apache.lucene.search.Query;
-import org.apache.lucene.spatial.geopoint.document.GeoPointField;
-import org.apache.lucene.spatial.geopoint.search.GeoPointDistanceQuery;
 import org.elasticsearch.Version;
 import org.elasticsearch.common.ParseField;
 import org.elasticsearch.common.ParsingException;
@@ -35,26 +34,20 @@ import org.elasticsearch.common.io.stream.StreamOutput;
 import org.elasticsearch.common.unit.DistanceUnit;
 import org.elasticsearch.common.xcontent.XContentBuilder;
 import org.elasticsearch.common.xcontent.XContentParser;
-import org.elasticsearch.index.fielddata.IndexGeoPointFieldData;
+import org.elasticsearch.index.mapper.BaseGeoPointFieldMapper;
 import org.elasticsearch.index.mapper.MappedFieldType;
-import org.elasticsearch.index.mapper.geo.BaseGeoPointFieldMapper;
-import org.elasticsearch.index.mapper.geo.GeoPointFieldMapper;
-import org.elasticsearch.index.mapper.geo.GeoPointFieldMapperLegacy;
-import org.elasticsearch.index.search.geo.GeoDistanceRangeQuery;
 
 import java.io.IOException;
 import java.util.Locale;
 import java.util.Objects;
+import java.util.Optional;
 
 /**
  * Filter results of a query to include only those within a specific distance to some
  * geo point.
- * */
+ */
 public class GeoDistanceQueryBuilder extends AbstractQueryBuilder<GeoDistanceQueryBuilder> {
-
-    /** Name of the query in the query dsl. */
     public static final String NAME = "geo_distance";
-    public static final ParseField QUERY_NAME_FIELD = new ParseField(NAME);
 
     /** Default for latitude normalization (as of this writing true).*/
     public static final boolean DEFAULT_NORMALIZE_LAT = true;
@@ -65,6 +58,7 @@ public class GeoDistanceQueryBuilder extends AbstractQueryBuilder<GeoDistanceQue
     /** Default for geo distance computation. */
     public static final GeoDistance DEFAULT_GEO_DISTANCE = GeoDistance.DEFAULT;
     /** Default for optimising query through pre computed bounding box query. */
+    @Deprecated
     public static final String DEFAULT_OPTIMIZE_BBOX = "memory";
 
     /**
@@ -77,7 +71,9 @@ public class GeoDistanceQueryBuilder extends AbstractQueryBuilder<GeoDistanceQue
             .withAllDeprecated("use validation_method instead");
     private static final ParseField COERCE_FIELD = new ParseField("coerce", "normalize")
             .withAllDeprecated("use validation_method instead");
-    private static final ParseField OPTIMIZE_BBOX_FIELD = new ParseField("optimize_bbox");
+    @Deprecated
+    private static final ParseField OPTIMIZE_BBOX_FIELD = new ParseField("optimize_bbox")
+            .withAllDeprecated("no replacement: `optimize_bbox` is no longer supported due to recent improvements");
     private static final ParseField DISTANCE_TYPE_FIELD = new ParseField("distance_type");
     private static final ParseField UNIT_FIELD = new ParseField("unit");
     private static final ParseField DISTANCE_FIELD = new ParseField("distance");
@@ -91,7 +87,7 @@ public class GeoDistanceQueryBuilder extends AbstractQueryBuilder<GeoDistanceQue
     /** Algorithm to use for distance computation. */
     private GeoDistance geoDistance = DEFAULT_GEO_DISTANCE;
     /** Whether or not to use a bbox for pre-filtering. TODO change to enum? */
-    private String optimizeBbox = DEFAULT_OPTIMIZE_BBOX;
+    private String optimizeBbox = null;
     /** How strict should geo coordinate validation be? */
     private GeoValidationMethod validationMethod = GeoValidationMethod.DEFAULT;
 
@@ -117,7 +113,7 @@ public class GeoDistanceQueryBuilder extends AbstractQueryBuilder<GeoDistanceQue
         distance = in.readDouble();
         validationMethod = GeoValidationMethod.readFromStream(in);
         center = in.readGeoPoint();
-        optimizeBbox = in.readString();
+        optimizeBbox = in.readOptionalString();
         geoDistance = GeoDistance.readFromStream(in);
         ignoreUnmapped = in.readBoolean();
     }
@@ -128,7 +124,7 @@ public class GeoDistanceQueryBuilder extends AbstractQueryBuilder<GeoDistanceQue
         out.writeDouble(distance);
         validationMethod.writeTo(out);
         out.writeGeoPoint(center);
-        out.writeString(optimizeBbox);
+        out.writeOptionalString(optimizeBbox);
         geoDistance.writeTo(out);
         out.writeBoolean(ignoreUnmapped);
     }
@@ -222,26 +218,20 @@ public class GeoDistanceQueryBuilder extends AbstractQueryBuilder<GeoDistanceQue
      * Set this to memory or indexed if before running the distance
      * calculation you want to limit the candidates to hits in the
      * enclosing bounding box.
+     * @deprecated
      **/
+    @Deprecated
     public GeoDistanceQueryBuilder optimizeBbox(String optimizeBbox) {
-        if (optimizeBbox == null) {
-            throw new IllegalArgumentException("optimizeBbox must not be null");
-        }
-        switch (optimizeBbox) {
-            case "none":
-            case "memory":
-            case "indexed":
-                break;
-            default:
-                throw new IllegalArgumentException("optimizeBbox must be one of [none, memory, indexed]");
-        }
         this.optimizeBbox = optimizeBbox;
         return this;
     }
 
     /**
      * Returns whether or not to run a BoundingBox query prior to
-     * distance query for optimization purposes.*/
+     * distance query for optimization purposes.
+     * @deprecated
+     **/
+    @Deprecated
     public String optimizeBbox() {
         return this.optimizeBbox;
     }
@@ -302,19 +292,7 @@ public class GeoDistanceQueryBuilder extends AbstractQueryBuilder<GeoDistanceQue
 
         double normDistance = geoDistance.normalize(this.distance, DistanceUnit.DEFAULT);
 
-        if (indexVersionCreated.before(Version.V_2_2_0)) {
-            GeoPointFieldMapperLegacy.GeoPointFieldType geoFieldType = ((GeoPointFieldMapperLegacy.GeoPointFieldType) fieldType);
-            IndexGeoPointFieldData indexFieldData = shardContext.getForField(fieldType);
-            return new GeoDistanceRangeQuery(center, null, normDistance, true, false, geoDistance,
-                    geoFieldType, indexFieldData, optimizeBbox);
-        }
-
-        // if index created V_2_2 use (soon to be legacy) numeric encoding postings format
-        // if index created V_2_3 > use prefix encoded postings format
-        final GeoPointField.TermEncoding encoding = (indexVersionCreated.before(Version.V_2_3_0)) ?
-            GeoPointField.TermEncoding.NUMERIC : GeoPointField.TermEncoding.PREFIX;
-        normDistance = GeoUtils.maxRadialDistance(center, normDistance);
-        return new GeoPointDistanceQuery(fieldType.name(), encoding, center.lat(), center.lon(), normDistance);
+        return LatLonPoint.newDistanceQuery(fieldType.name(), center.lat(), center.lon(), normDistance);
     }
 
     @Override
@@ -323,14 +301,16 @@ public class GeoDistanceQueryBuilder extends AbstractQueryBuilder<GeoDistanceQue
         builder.startArray(fieldName).value(center.lon()).value(center.lat()).endArray();
         builder.field(DISTANCE_FIELD.getPreferredName(), distance);
         builder.field(DISTANCE_TYPE_FIELD.getPreferredName(), geoDistance.name().toLowerCase(Locale.ROOT));
-        builder.field(OPTIMIZE_BBOX_FIELD.getPreferredName(), optimizeBbox);
+        if (Strings.isEmpty(optimizeBbox) == false) {
+            builder.field(OPTIMIZE_BBOX_FIELD.getPreferredName(), optimizeBbox);
+        }
         builder.field(VALIDATION_METHOD_FIELD.getPreferredName(), validationMethod);
         builder.field(IGNORE_UNMAPPED_FIELD.getPreferredName(), ignoreUnmapped);
         printBoostAndQueryName(builder);
         builder.endObject();
     }
 
-    public static GeoDistanceQueryBuilder fromXContent(QueryParseContext parseContext) throws IOException {
+    public static Optional<GeoDistanceQueryBuilder> fromXContent(QueryParseContext parseContext) throws IOException {
         XContentParser parser = parseContext.parser();
 
         XContentParser.Token token;
@@ -343,7 +323,7 @@ public class GeoDistanceQueryBuilder extends AbstractQueryBuilder<GeoDistanceQue
         Object vDistance = null;
         DistanceUnit unit = GeoDistanceQueryBuilder.DEFAULT_DISTANCE_UNIT;
         GeoDistance geoDistance = GeoDistanceQueryBuilder.DEFAULT_GEO_DISTANCE;
-        String optimizeBbox = GeoDistanceQueryBuilder.DEFAULT_OPTIMIZE_BBOX;
+        String optimizeBbox = null;
         boolean coerce = GeoValidationMethod.DEFAULT_LENIENT_PARSING;
         boolean ignoreMalformed = GeoValidationMethod.DEFAULT_LENIENT_PARSING;
         GeoValidationMethod validationMethod = null;
@@ -358,19 +338,19 @@ public class GeoDistanceQueryBuilder extends AbstractQueryBuilder<GeoDistanceQue
                 fieldName = currentFieldName;
                 GeoUtils.parseGeoPoint(parser, point);
             } else if (token == XContentParser.Token.START_OBJECT) {
+                throwParsingExceptionOnMultipleFields(NAME, parser.getTokenLocation(), fieldName, currentFieldName);
                 // the json in the format of -> field : { lat : 30, lon : 12 }
                 String currentName = parser.currentName();
-                assert currentFieldName != null;
                 fieldName = currentFieldName;
                 while ((token = parser.nextToken()) != XContentParser.Token.END_OBJECT) {
                     if (token == XContentParser.Token.FIELD_NAME) {
                         currentName = parser.currentName();
                     } else if (token.isValue()) {
-                        if (currentName.equals(GeoPointFieldMapper.Names.LAT)) {
+                        if (currentName.equals("lat")) {
                             point.resetLat(parser.doubleValue());
-                        } else if (currentName.equals(GeoPointFieldMapper.Names.LON)) {
+                        } else if (currentName.equals("lon")) {
                             point.resetLon(parser.doubleValue());
-                        } else if (currentName.equals(GeoPointFieldMapper.Names.GEOHASH)) {
+                        } else if (currentName.equals("geohash")) {
                             point.resetFromGeoHash(parser.text());
                         } else {
                             throw new ParsingException(parser.getTokenLocation(),
@@ -389,12 +369,12 @@ public class GeoDistanceQueryBuilder extends AbstractQueryBuilder<GeoDistanceQue
                     unit = DistanceUnit.fromString(parser.text());
                 } else if (parseContext.getParseFieldMatcher().match(currentFieldName, DISTANCE_TYPE_FIELD)) {
                     geoDistance = GeoDistance.fromString(parser.text());
-                } else if (currentFieldName.endsWith(GeoPointFieldMapper.Names.LAT_SUFFIX)) {
+                } else if (currentFieldName.endsWith(".lat")) {
                     point.resetLat(parser.doubleValue());
-                    fieldName = currentFieldName.substring(0, currentFieldName.length() - GeoPointFieldMapper.Names.LAT_SUFFIX.length());
-                } else if (currentFieldName.endsWith(GeoPointFieldMapper.Names.LON_SUFFIX)) {
+                    fieldName = currentFieldName.substring(0, currentFieldName.length() - ".lat".length());
+                } else if (currentFieldName.endsWith(".lon")) {
                     point.resetLon(parser.doubleValue());
-                    fieldName = currentFieldName.substring(0, currentFieldName.length() - GeoPointFieldMapper.Names.LON_SUFFIX.length());
+                    fieldName = currentFieldName.substring(0, currentFieldName.length() - ".lon".length());
                 } else if (parseContext.getParseFieldMatcher().match(currentFieldName, AbstractQueryBuilder.NAME_FIELD)) {
                     queryName = parser.text();
                 } else if (parseContext.getParseFieldMatcher().match(currentFieldName, AbstractQueryBuilder.BOOST_FIELD)) {
@@ -403,7 +383,7 @@ public class GeoDistanceQueryBuilder extends AbstractQueryBuilder<GeoDistanceQue
                     optimizeBbox = parser.textOrNull();
                 } else if (parseContext.getParseFieldMatcher().match(currentFieldName, COERCE_FIELD)) {
                     coerce = parser.booleanValue();
-                    if (coerce == true) {
+                    if (coerce) {
                         ignoreMalformed = true;
                     }
                 } else if (parseContext.getParseFieldMatcher().match(currentFieldName, IGNORE_MALFORMED_FIELD)) {
@@ -445,7 +425,7 @@ public class GeoDistanceQueryBuilder extends AbstractQueryBuilder<GeoDistanceQue
         qb.boost(boost);
         qb.queryName(queryName);
         qb.ignoreUnmapped(ignoreUnmapped);
-        return qb;
+        return Optional.of(qb);
     }
 
     @Override

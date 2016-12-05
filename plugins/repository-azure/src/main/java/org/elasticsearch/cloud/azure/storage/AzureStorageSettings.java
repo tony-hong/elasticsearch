@@ -25,7 +25,6 @@ import org.elasticsearch.common.settings.Setting;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.settings.SettingsException;
 import org.elasticsearch.common.unit.TimeValue;
-import org.elasticsearch.repositories.RepositorySettings;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -35,12 +34,7 @@ import java.util.Map;
 import java.util.function.Function;
 
 public final class AzureStorageSettings {
-    private static final String TIMEOUT_SUFFIX = "timeout";
-    private static final String ACCOUNT_SUFFIX = "account";
-    private static final String KEY_SUFFIX = "key";
-    private static final String DEFAULT_SUFFIX = "default";
-
-    private static final Setting.AffixKey TIMEOUT_KEY = Setting.AffixKey.withAdfix(Storage.PREFIX, TIMEOUT_SUFFIX);
+    private static final Setting.AffixKey TIMEOUT_KEY = Setting.AffixKey.withAffix(Storage.PREFIX, "timeout");
 
     private static final Setting<TimeValue> TIMEOUT_SETTING = Setting.affixKeySetting(
         TIMEOUT_KEY,
@@ -48,11 +42,11 @@ public final class AzureStorageSettings {
         (s) -> Setting.parseTimeValue(s, TimeValue.timeValueSeconds(-1), TIMEOUT_KEY.toString()),
         Setting.Property.NodeScope);
     private static final Setting<String> ACCOUNT_SETTING =
-        Setting.adfixKeySetting(Storage.PREFIX, ACCOUNT_SUFFIX, "", Function.identity(), Setting.Property.NodeScope);
+        Setting.affixKeySetting(Storage.PREFIX, "account", "", Function.identity(), Setting.Property.NodeScope);
     private static final Setting<String> KEY_SETTING =
-        Setting.adfixKeySetting(Storage.PREFIX, KEY_SUFFIX, "", Function.identity(), Setting.Property.NodeScope);
+        Setting.affixKeySetting(Storage.PREFIX, "key", "", Function.identity(), Setting.Property.NodeScope);
     private static final Setting<Boolean> DEFAULT_SETTING =
-        Setting.adfixKeySetting(Storage.PREFIX, DEFAULT_SUFFIX, "false", Boolean::valueOf, Setting.Property.NodeScope);
+        Setting.affixKeySetting(Storage.PREFIX, "default", "false", Boolean::valueOf, Setting.Property.NodeScope);
 
 
     private final String name;
@@ -112,9 +106,8 @@ public final class AzureStorageSettings {
     }
 
     private static List<AzureStorageSettings> createStorageSettings(Settings settings) {
-        Setting<Settings> storageGroupSetting = Setting.groupSetting(Storage.PREFIX, Setting.Property.NodeScope);
         // ignore global timeout which has the same prefix but does not belong to any group
-        Settings groups = storageGroupSetting.get(settings.filter((k) -> k.equals(Storage.TIMEOUT_SETTING.getKey()) == false));
+        Settings groups = Storage.STORAGE_ACCOUNTS.get(settings.filter((k) -> k.equals(Storage.TIMEOUT_SETTING.getKey()) == false));
         List<AzureStorageSettings> storageSettings = new ArrayList<>();
         for (String groupName : groups.getAsGroups().keySet()) {
             storageSettings.add(
@@ -173,20 +166,21 @@ public final class AzureStorageSettings {
         return Collections.unmodifiableMap(secondaries);
     }
 
-    public static <T> T getValue(RepositorySettings repositorySettings,
+    public static <T> T getValue(Settings repositorySettings,
+                                 Settings globalSettings,
                                  Setting<T> repositorySetting,
                                  Setting<T> repositoriesSetting) {
-        if (repositorySetting.exists(repositorySettings.settings())) {
-            return repositorySetting.get(repositorySettings.settings());
+        if (repositorySetting.exists(repositorySettings)) {
+            return repositorySetting.get(repositorySettings);
         } else {
-            return repositoriesSetting.get(repositorySettings.globalSettings());
+            return repositoriesSetting.get(globalSettings);
         }
     }
 
-    public static <T> Setting<T> getEffectiveSetting(RepositorySettings repositorySettings,
+    public static <T> Setting<T> getEffectiveSetting(Settings repositorySettings,
                                               Setting<T> repositorySetting,
                                               Setting<T> repositoriesSetting) {
-        if (repositorySetting.exists(repositorySettings.settings())) {
+        if (repositorySetting.exists(repositorySettings)) {
             return repositorySetting;
         } else {
             return repositoriesSetting;

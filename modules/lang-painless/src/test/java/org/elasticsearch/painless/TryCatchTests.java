@@ -26,32 +26,32 @@ public class TryCatchTests extends ScriptTestCase {
 
     /** throws an exception */
     public void testThrow() {
-        RuntimeException exception = expectThrows(RuntimeException.class, () -> {
+        RuntimeException exception = expectScriptThrows(RuntimeException.class, () -> {
             exec("throw new RuntimeException('test')");
         });
         assertEquals("test", exception.getMessage());
     }
-    
+
     /** catches the exact exception */
     public void testCatch() {
-        assertEquals(1, exec("try { if (params.param == 'true') throw new RuntimeException('test'); } " + 
-                             "catch (RuntimeException e) { return 1; } return 2;", 
-                              Collections.singletonMap("param", "true")));
+        assertEquals(1, exec("try { if (params.param == 'true') throw new RuntimeException('test'); } " +
+                             "catch (RuntimeException e) { return 1; } return 2;",
+                              Collections.singletonMap("param", "true"), true));
     }
-    
+
     /** catches superclass of the exception */
     public void testCatchSuperclass() {
-        assertEquals(1, exec("try { if (params.param == 'true') throw new RuntimeException('test'); } " + 
-                             "catch (Exception e) { return 1; } return 2;", 
-                              Collections.singletonMap("param", "true")));
+        assertEquals(1, exec("try { if (params.param == 'true') throw new RuntimeException('test'); } " +
+                             "catch (Exception e) { return 1; } return 2;",
+                              Collections.singletonMap("param", "true"), true));
     }
-    
+
     /** tries to catch a different type of exception */
     public void testNoCatch() {
-        RuntimeException exception = expectThrows(RuntimeException.class, () -> {
-           exec("try { if (params.param == 'true') throw new RuntimeException('test'); } " + 
-                "catch (ArithmeticException e) { return 1; } return 2;", 
-                Collections.singletonMap("param", "true"));
+        RuntimeException exception = expectScriptThrows(RuntimeException.class, () -> {
+           exec("try { if (params.param == 'true') throw new RuntimeException('test'); } " +
+                "catch (ArithmeticException e) { return 1; } return 2;",
+                Collections.singletonMap("param", "true"), true);
         });
         assertEquals("test", exception.getMessage());
     }

@@ -23,7 +23,6 @@ import org.elasticsearch.ElasticsearchParseException;
 import org.elasticsearch.action.ActionRequest;
 import org.elasticsearch.action.ActionRequestValidationException;
 import org.elasticsearch.action.CompositeIndicesRequest;
-import org.elasticsearch.action.IndicesRequest;
 import org.elasticsearch.action.RealtimeRequest;
 import org.elasticsearch.action.ValidateActions;
 import org.elasticsearch.common.Nullable;
@@ -41,7 +40,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Set;
 
-public class MultiTermVectorsRequest extends ActionRequest<MultiTermVectorsRequest> implements Iterable<TermVectorsRequest>, CompositeIndicesRequest, RealtimeRequest {
+public class MultiTermVectorsRequest extends ActionRequest implements Iterable<TermVectorsRequest>, CompositeIndicesRequest, RealtimeRequest {
 
     String preference;
     List<TermVectorsRequest> requests = new ArrayList<>();
@@ -77,11 +76,6 @@ public class MultiTermVectorsRequest extends ActionRequest<MultiTermVectorsReque
     }
 
     @Override
-    public List<? extends IndicesRequest> subRequests() {
-        return requests;
-    }
-
-    @Override
     public Iterator<TermVectorsRequest> iterator() {
         return Collections.unmodifiableCollection(requests).iterator();
     }
@@ -94,7 +88,7 @@ public class MultiTermVectorsRequest extends ActionRequest<MultiTermVectorsReque
         return requests;
     }
 
-    public void add(TermVectorsRequest template, BytesReference data) throws Exception {
+    public void add(TermVectorsRequest template, BytesReference data) throws IOException {
         XContentParser.Token token;
         String currentFieldName = null;
         if (data.length() > 0) {

@@ -22,6 +22,7 @@ package org.elasticsearch.cluster.metadata;
 import com.carrotsearch.hppc.ObjectHashSet;
 import com.carrotsearch.hppc.cursors.ObjectCursor;
 import com.carrotsearch.hppc.cursors.ObjectObjectCursor;
+import org.apache.logging.log4j.Logger;
 import org.apache.lucene.util.CollectionUtil;
 import org.elasticsearch.cluster.Diff;
 import org.elasticsearch.cluster.Diffable;
@@ -29,7 +30,7 @@ import org.elasticsearch.cluster.DiffableUtils;
 import org.elasticsearch.cluster.InternalClusterInfoService;
 import org.elasticsearch.cluster.block.ClusterBlock;
 import org.elasticsearch.cluster.block.ClusterBlockLevel;
-import org.elasticsearch.cluster.routing.allocation.decider.DiskThresholdDecider;
+import org.elasticsearch.cluster.routing.allocation.DiskThresholdSettings;
 import org.elasticsearch.cluster.service.ClusterService;
 import org.elasticsearch.common.Nullable;
 import org.elasticsearch.common.ParseFieldMatcher;
@@ -38,7 +39,6 @@ import org.elasticsearch.common.collect.HppcMaps;
 import org.elasticsearch.common.collect.ImmutableOpenMap;
 import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.io.stream.StreamOutput;
-import org.elasticsearch.common.logging.ESLogger;
 import org.elasticsearch.common.regex.Regex;
 import org.elasticsearch.common.settings.Setting;
 import org.elasticsearch.common.settings.Setting.Property;
@@ -54,9 +54,7 @@ import org.elasticsearch.discovery.DiscoverySettings;
 import org.elasticsearch.gateway.MetaDataStateFormat;
 import org.elasticsearch.index.Index;
 import org.elasticsearch.index.IndexNotFoundException;
-import org.elasticsearch.index.store.IndexStoreConfig;
 import org.elasticsearch.indices.recovery.RecoverySettings;
-import org.elasticsearch.indices.ttl.IndicesTTLService;
 import org.elasticsearch.ingest.IngestMetadata;
 import org.elasticsearch.rest.RestStatus;
 import org.elasticsearch.script.ScriptMetaData;
@@ -97,9 +95,28 @@ public class MetaData implements Iterable<IndexMetaData>, Diffable<MetaData>, Fr
         SNAPSHOT
     }
 
+    /**
+     * Indicates that this custom metadata will be returned as part of an API call but will not be persisted
+     */
     public static EnumSet<XContentContext> API_ONLY = EnumSet.of(XContentContext.API);
+
+    /**
+     * Indicates that this custom metadata will be returned as part of an API call and will be persisted between
+     * node restarts, but will not be a part of a snapshot global state
+     */
     public static EnumSet<XContentContext> API_AND_GATEWAY = EnumSet.of(XContentContext.API, XContentContext.GATEWAY);
+
+    /**
+     * Indicates that this custom metadata will be returned as part of an API call and stored as a part of
+     * a snapshot global state, but will not be persisted between node restarts
+     */
     public static EnumSet<XContentContext> API_AND_SNAPSHOT = EnumSet.of(XContentContext.API, XContentContext.SNAPSHOT);
+
+    /**
+     * Indicates that this custom metadata will be returned as part of an API call, stored as a part of
+     * a snapshot global state, and will be persisted between node restarts
+     */
+    public static EnumSet<XContentContext> ALL_CONTEXTS = EnumSet.allOf(XContentContext.class);
 
     public interface Custom extends Diffable<Custom>, ToXContent {
 
@@ -460,6 +477,11 @@ public class MetaData implements Iterable<IndexMetaData>, Diffable<MetaData>, Fr
         return null;
     }
 
+    /** Returns true iff existing index has the same {@link IndexMetaData} instance */
+    public boolean hasIndexMetaData(final IndexMetaData indexMetaData) {
+        return indices.get(indexMetaData.getIndex().getName()) == indexMetaData;
+    }
+
     /**
      * Returns the {@link IndexMetaData} for this index.
      * @throws IndexNotFoundException if no metadata for this index is found
@@ -733,19 +755,17 @@ public class MetaData implements Iterable<IndexMetaData>, Diffable<MetaData>, Fr
 
     /** All known byte-sized cluster settings. */
     public static final Set<String> CLUSTER_BYTES_SIZE_SETTINGS = unmodifiableSet(newHashSet(
-        IndexStoreConfig.INDICES_STORE_THROTTLE_MAX_BYTES_PER_SEC_SETTING.getKey(),
         RecoverySettings.INDICES_RECOVERY_MAX_BYTES_PER_SEC_SETTING.getKey()));
 
 
     /** All known time cluster settings. */
     public static final Set<String> CLUSTER_TIME_SETTINGS = unmodifiableSet(newHashSet(
-                                    IndicesTTLService.INDICES_TTL_INTERVAL_SETTING.getKey(),
                                     RecoverySettings.INDICES_RECOVERY_RETRY_DELAY_STATE_SYNC_SETTING.getKey(),
                                     RecoverySettings.INDICES_RECOVERY_RETRY_DELAY_NETWORK_SETTING.getKey(),
                                     RecoverySettings.INDICES_RECOVERY_ACTIVITY_TIMEOUT_SETTING.getKey(),
                                     RecoverySettings.INDICES_RECOVERY_INTERNAL_ACTION_TIMEOUT_SETTING.getKey(),
                                     RecoverySettings.INDICES_RECOVERY_INTERNAL_LONG_ACTION_TIMEOUT_SETTING.getKey(),
-                                    DiskThresholdDecider.CLUSTER_ROUTING_ALLOCATION_REROUTE_INTERVAL_SETTING.getKey(),
+                                    DiskThresholdSettings.CLUSTER_ROUTING_ALLOCATION_REROUTE_INTERVAL_SETTING.getKey(),
                                     InternalClusterInfoService.INTERNAL_CLUSTER_INFO_UPDATE_INTERVAL_SETTING.getKey(),
                                     InternalClusterInfoService.INTERNAL_CLUSTER_INFO_TIMEOUT_SETTING.getKey(),
                                     DiscoverySettings.PUBLISH_TIMEOUT_SETTING.getKey(),
@@ -753,7 +773,7 @@ public class MetaData implements Iterable<IndexMetaData>, Diffable<MetaData>, Fr
 
     /** As of 2.0 we require units for time and byte-sized settings.  This methods adds default units to any cluster settings that don't
      *  specify a unit. */
-    public static MetaData addDefaultUnitsIfNeeded(ESLogger logger, MetaData metaData) {
+    public static MetaData addDefaultUnitsIfNeeded(Logger logger, MetaData metaData) {
         Settings.Builder newPersistentSettings = null;
         for(Map.Entry<String,String> ent : metaData.persistentSettings().getAsMap().entrySet()) {
             String settingName = ent.getKey();
@@ -1187,7 +1207,7 @@ public class MetaData implements Iterable<IndexMetaData>, Diffable<MetaData>, Fr
         }
     }
 
-    private final static ToXContent.Params FORMAT_PARAMS;
+    private static final ToXContent.Params FORMAT_PARAMS;
     static {
         Map<String, String> params = new HashMap<>(2);
         params.put("binary", "true");
@@ -1198,7 +1218,7 @@ public class MetaData implements Iterable<IndexMetaData>, Diffable<MetaData>, Fr
     /**
      * State format for {@link MetaData} to write to and load from disk
      */
-    public final static MetaDataStateFormat<MetaData> FORMAT = new MetaDataStateFormat<MetaData>(XContentType.SMILE, GLOBAL_STATE_FILE_PREFIX) {
+    public static final MetaDataStateFormat<MetaData> FORMAT = new MetaDataStateFormat<MetaData>(XContentType.SMILE, GLOBAL_STATE_FILE_PREFIX) {
 
         @Override
         public void toXContent(XContentBuilder builder, MetaData state) throws IOException {

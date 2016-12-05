@@ -29,7 +29,7 @@ import java.io.IOException;
 /**
  * A based request for master based operation.
  */
-public abstract class MasterNodeRequest<Request extends MasterNodeRequest<Request>> extends ActionRequest<Request> {
+public abstract class MasterNodeRequest<Request extends MasterNodeRequest<Request>> extends ActionRequest {
 
     public static final TimeValue DEFAULT_MASTER_NODE_TIMEOUT = TimeValue.timeValueSeconds(30);
 
@@ -61,7 +61,7 @@ public abstract class MasterNodeRequest<Request extends MasterNodeRequest<Reques
     @Override
     public void readFrom(StreamInput in) throws IOException {
         super.readFrom(in);
-        masterNodeTimeout = TimeValue.readTimeValue(in);
+        masterNodeTimeout = new TimeValue(in);
     }
 
     @Override

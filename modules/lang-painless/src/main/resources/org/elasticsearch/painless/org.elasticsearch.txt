@@ -57,71 +57,73 @@ class def -> java.lang.Object {
   String toString()
 }
 
+
+#### Painless debugging API
+
+class Debug -> org.elasticsearch.painless.Debug extends Object {
+  void explain(Object)
+}
+
 #### ES Scripting API
 
-class GeoPoint -> org.elasticsearch.common.geo.GeoPoint extends Object {
+class org.elasticsearch.common.geo.GeoPoint -> org.elasticsearch.common.geo.GeoPoint extends Object {
   double getLat()
   double getLon()
 }
 
-class Strings -> org.elasticsearch.index.fielddata.ScriptDocValues$Strings extends List,Collection,Iterable,Object {
+class org.elasticsearch.index.fielddata.ScriptDocValues.Strings -> org.elasticsearch.index.fielddata.ScriptDocValues$Strings extends List,Collection,Iterable,Object {
+  String get(int)
   String getValue()
   List getValues()
 }
 
-class Longs -> org.elasticsearch.index.fielddata.ScriptDocValues$Longs extends List,Collection,Iterable,Object {
+class org.elasticsearch.index.fielddata.ScriptDocValues.Longs -> org.elasticsearch.index.fielddata.ScriptDocValues$Longs extends List,Collection,Iterable,Object {
+  Long get(int)
   long getValue()
   List getValues()
+  org.joda.time.ReadableDateTime getDate()
 }
 
-class Doubles -> org.elasticsearch.index.fielddata.ScriptDocValues$Doubles extends List,Collection,Iterable,Object {
+class org.elasticsearch.index.fielddata.ScriptDocValues.Doubles -> org.elasticsearch.index.fielddata.ScriptDocValues$Doubles extends List,Collection,Iterable,Object {
+  Double get(int)
   double getValue()
   List getValues()
 }
 
-class GeoPoints -> org.elasticsearch.index.fielddata.ScriptDocValues$GeoPoints extends List,Collection,Iterable,Object {
-  GeoPoint getValue()
+class org.elasticsearch.index.fielddata.ScriptDocValues.GeoPoints -> org.elasticsearch.index.fielddata.ScriptDocValues$GeoPoints extends List,Collection,Iterable,Object {
+  org.elasticsearch.common.geo.GeoPoint get(int)
+  org.elasticsearch.common.geo.GeoPoint getValue()
   List getValues()
   double getLat()
   double getLon()
   double[] getLats()
   double[] getLons()
 
-  # geo distance functions... so many...
-  double factorDistance(double,double)
-  double factorDistanceWithDefault(double,double,double)
-  double factorDistance02(double,double)
-  double factorDistance13(double,double)
+  # geo distance functions
   double arcDistance(double,double)
   double arcDistanceWithDefault(double,double,double)
-  double arcDistanceInKm(double,double)
-  double arcDistanceInKmWithDefault(double,double,double)
-  double arcDistanceInMiles(double,double)
-  double arcDistanceInMilesWithDefault(double,double,double)
-  double distance(double,double)
-  double distanceWithDefault(double,double,double)
-  double distanceInKm(double,double)
-  double distanceInKmWithDefault(double,double,double)
-  double distanceInMiles(double,double)
-  double distanceInMilesWithDefault(double,double,double)
+  double planeDistance(double,double)
+  double planeDistanceWithDefault(double,double,double)
   double geohashDistance(String)
-  double geohashDistanceInKm(String)
-  double geohashDistanceInMiles(String)
+  double geohashDistanceWithDefault(String,double)
+}
+
+class org.elasticsearch.index.fielddata.ScriptDocValues.Booleans -> org.elasticsearch.index.fielddata.ScriptDocValues$Booleans extends List,Collection,Iterable,Object {
+  Boolean get(int)
+  boolean getValue()
+  List getValues()
 }
 
 # for testing.
 # currently FeatureTest exposes overloaded constructor, field load store, and overloaded static methods
-class FeatureTest -> org.elasticsearch.painless.FeatureTest extends Object {
-  FeatureTest <init>()
-  FeatureTest <init>(int,int)
+class org.elasticsearch.painless.FeatureTest -> org.elasticsearch.painless.FeatureTest extends Object {
+  org.elasticsearch.painless.FeatureTest <init>()
+  org.elasticsearch.painless.FeatureTest <init>(int,int)
   int getX()
   int getY()
   void setX(int)
   void setY(int)
   boolean overloadedStatic()
   boolean overloadedStatic(boolean)
-}
-
-# currently needed internally
-class Executable -> org.elasticsearch.painless.Executable {
+  Object twoFunctionsOfX(Function,Function)
 }

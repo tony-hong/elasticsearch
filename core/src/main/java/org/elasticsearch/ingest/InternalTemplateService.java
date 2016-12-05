@@ -20,12 +20,12 @@
 package org.elasticsearch.ingest;
 
 import org.elasticsearch.common.bytes.BytesReference;
-import org.elasticsearch.ingest.core.TemplateService;
 import org.elasticsearch.script.CompiledScript;
 import org.elasticsearch.script.ExecutableScript;
 import org.elasticsearch.script.Script;
 import org.elasticsearch.script.ScriptContext;
 import org.elasticsearch.script.ScriptService;
+import org.elasticsearch.script.ScriptType;
 
 import java.util.Collections;
 import java.util.Map;
@@ -43,19 +43,18 @@ public class InternalTemplateService implements TemplateService {
         int mustacheStart = template.indexOf("{{");
         int mustacheEnd = template.indexOf("}}");
         if (mustacheStart != -1 && mustacheEnd != -1 && mustacheStart < mustacheEnd) {
-            Script script = new Script(template, ScriptService.ScriptType.INLINE, "mustache", Collections.emptyMap());
+            Script script = new Script(ScriptType.INLINE, "mustache", template, Collections.emptyMap());
             CompiledScript compiledScript = scriptService.compile(
                 script,
                 ScriptContext.Standard.INGEST,
-                Collections.emptyMap(),
-                null); // null == OK, because ingest templates are only inline templates.
+                Collections.emptyMap());
             return new Template() {
                 @Override
                 public String execute(Map<String, Object> model) {
                     ExecutableScript executableScript = scriptService.executable(compiledScript, model);
                     Object result = executableScript.run();
                     if (result instanceof BytesReference) {
-                        return ((BytesReference) result).toUtf8();
+                        return ((BytesReference) result).utf8ToString();
                     }
                     return String.valueOf(result);
                 }

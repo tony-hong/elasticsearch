@@ -28,7 +28,6 @@ import java.util.Collections;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Map;
 
 /**
  * A {@link RoutingNode} represents a cluster node associated with a single {@link DiscoveryNode} including all shards
@@ -69,10 +68,6 @@ public class RoutingNode implements Iterable<ShardRouting> {
         return Collections.unmodifiableCollection(shards.values()).iterator();
     }
 
-    Iterator<ShardRouting> mutableIterator() {
-        return shards.values().iterator();
-    }
-
     /**
      * Returns the nodes {@link DiscoveryNode}.
      *
@@ -82,7 +77,8 @@ public class RoutingNode implements Iterable<ShardRouting> {
         return this.node;
     }
 
-    public @Nullable ShardRouting getByShardId(ShardId id) {
+    @Nullable
+    public ShardRouting getByShardId(ShardId id) {
         return shards.get(id);
     }
 
@@ -104,7 +100,8 @@ public class RoutingNode implements Iterable<ShardRouting> {
      */
     void add(ShardRouting shard) {
         if (shards.containsKey(shard.shardId())) {
-            throw new IllegalStateException("Trying to add a shard " + shard.shardId() + " to a node [" + nodeId + "] where it already exists");
+            throw new IllegalStateException("Trying to add a shard " + shard.shardId() + " to a node [" + nodeId
+                + "] where it already exists. current [" + shards.get(shard.shardId()) + "]. new [" + shard + "]");
         }
         shards.put(shard.shardId(), shard);
     }
@@ -117,6 +114,11 @@ public class RoutingNode implements Iterable<ShardRouting> {
         }
         ShardRouting previousValue = shards.put(newShard.shardId(), newShard);
         assert previousValue == oldShard : "expected shard " + previousValue + " but was " + oldShard;
+    }
+
+    void remove(ShardRouting shard) {
+        ShardRouting previousValue = shards.remove(shard.shardId());
+        assert previousValue == shard : "expected shard " + previousValue + " but was " + shard;
     }
 
     /**

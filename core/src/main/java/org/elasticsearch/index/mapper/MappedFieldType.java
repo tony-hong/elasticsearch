@@ -35,9 +35,11 @@ import org.apache.lucene.search.BoostQuery;
 import org.elasticsearch.action.fieldstats.FieldStats;
 import org.elasticsearch.common.Nullable;
 import org.elasticsearch.common.joda.DateMathParser;
+import org.elasticsearch.common.lucene.all.AllTermQuery;
 import org.elasticsearch.common.unit.Fuzziness;
 import org.elasticsearch.index.analysis.NamedAnalyzer;
 import org.elasticsearch.index.fielddata.IndexFieldData;
+import org.elasticsearch.index.query.QueryRewriteContext;
 import org.elasticsearch.index.query.QueryShardContext;
 import org.elasticsearch.index.query.QueryShardException;
 import org.elasticsearch.index.similarity.SimilarityProvider;
@@ -133,13 +135,13 @@ public abstract class MappedFieldType extends FieldType {
             eagerGlobalOrdinals, similarity == null ? null : similarity.name(), nullValue, nullValueAsString);
     }
 
-    // norelease: we need to override freeze() and add safety checks that all settings are actually set
+    // TODO: we need to override freeze() and add safety checks that all settings are actually set
 
     /** Returns the name of this type, as would be specified in mapping properties */
     public abstract String typeName();
 
     /** Checks this type is the same type as other. Adds a conflict if they are different. */
-    private final void checkTypeName(MappedFieldType other) {
+    private void checkTypeName(MappedFieldType other) {
         if (typeName().equals(other.typeName()) == false) {
             throw new IllegalArgumentException("mapper [" + name + "] cannot be changed from type [" + typeName() + "] to [" + other.typeName() + "]");
         } else if (getClass() != other.getClass()) {
@@ -303,7 +305,7 @@ public abstract class MappedFieldType extends FieldType {
     /** Given a value that comes from the stored fields API, convert it to the
      *  expected type. For instance a date field would store dates as longs and
      *  format it back to a string in this method. */
-    public Object valueForSearch(Object value) {
+    public Object valueForDisplay(Object value) {
         return value;
     }
 
@@ -343,7 +345,7 @@ public abstract class MappedFieldType extends FieldType {
         return new ConstantScoreQuery(builder.build());
     }
 
-    public Query rangeQuery(Object lowerTerm, Object upperTerm, boolean includeLower, boolean includeUpper) {
+    public Query rangeQuery(Object lowerTerm, Object upperTerm, boolean includeLower, boolean includeUpper, QueryShardContext context) {
         throw new IllegalArgumentException("Field [" + name + "] of type [" + typeName() + "] does not support range queries");
     }
 
@@ -399,10 +401,10 @@ public abstract class MappedFieldType extends FieldType {
      *  {@link Relation#INTERSECTS}, which is always fine to return when there is
      *  no way to check whether values are actually within bounds. */
     public Relation isFieldWithinQuery(
-            IndexReader reader,
-            Object from, Object to,
-            boolean includeLower, boolean includeUpper,
-            DateTimeZone timeZone, DateMathParser dateMathParser) throws IOException {
+        IndexReader reader,
+        Object from, Object to,
+        boolean includeLower, boolean includeUpper,
+        DateTimeZone timeZone, DateMathParser dateMathParser, QueryRewriteContext context) throws IOException {
         return Relation.INTERSECTS;
     }
 
@@ -461,6 +463,12 @@ public abstract class MappedFieldType extends FieldType {
     public static Term extractTerm(Query termQuery) {
         while (termQuery instanceof BoostQuery) {
             termQuery = ((BoostQuery) termQuery).getQuery();
+        }
+        if (termQuery instanceof AllTermQuery) {
+            return ((AllTermQuery) termQuery).getTerm();
+        } else if (termQuery instanceof TypeFieldMapper.TypesQuery) {
+            assert ((TypeFieldMapper.TypesQuery) termQuery).getTerms().length == 1;
+            return new Term(TypeFieldMapper.NAME, ((TypeFieldMapper.TypesQuery) termQuery).getTerms()[0]);
         }
         if (termQuery instanceof TermQuery == false) {
             throw new IllegalArgumentException("Cannot extract a term from a query of type "

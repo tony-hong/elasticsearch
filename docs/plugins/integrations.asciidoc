@@ -27,7 +27,10 @@ Integrations are not plugins, but are external tools or modules that make it eas
   Tiki has native support for Elasticsearch. This provides faster & better
   search (facets, etc), along with some Natural Language Processing features
   (ex.: More like this)
-
+  
+* http://extensions.xwiki.org/xwiki/bin/view/Extension/Elastic+Search+Macro/[XWiki Next Generation Wiki]:
+  XWiki has an Elasticsearch and Kibana macro allowing to run Elasticsearch queries and display the results in XWiki pages using XWiki's scripting language as well as include Kibana Widgets in XWiki pages
+ 
 [float]
 [[data-integrations]]
 === Data import/export and validation
@@ -187,3 +190,17 @@ releases 2.0 and later do not support rivers.
 * https://www.wireshark.org/[Wireshark]:
   Protocol dissection for Zen discovery, HTTP and the binary protocol
 
+* https://www.itemsapi.com/[ItemsAPI]:
+  Search backend for mobile and web
+
+
+These projects appear to have been abandoned:
+
+* http://www.github.com/neogenix/daikon[daikon]:
+  Daikon Elasticsearch CLI
+
+* https://github.com/fullscale/dangle[dangle]:
+  A set of AngularJS directives that provide common visualizations for elasticsearch based on
+  D3.
+* https://github.com/OlegKunitsyn/eslogd[eslogd]:
+  Linux daemon that replicates events to a central Elasticsearch server in realtime

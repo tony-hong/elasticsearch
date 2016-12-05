@@ -31,9 +31,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 
-/**
- *
- */
 public abstract class BaseNodesResponse<TNodeResponse extends BaseNodeResponse> extends ActionResponse {
 
     private ClusterName clusterName;
@@ -106,7 +103,7 @@ public abstract class BaseNodesResponse<TNodeResponse extends BaseNodeResponse> 
     @Override
     public void readFrom(StreamInput in) throws IOException {
         super.readFrom(in);
-        clusterName = ClusterName.readClusterName(in);
+        clusterName = new ClusterName(in);
         nodes = readNodesFrom(in);
         failures = in.readList(FailedNodeException::new);
     }

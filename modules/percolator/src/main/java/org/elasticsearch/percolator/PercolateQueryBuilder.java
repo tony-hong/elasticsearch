@@ -22,20 +22,22 @@ package org.elasticsearch.percolator;
 import org.apache.lucene.analysis.Analyzer;
 import org.apache.lucene.analysis.DelegatingAnalyzerWrapper;
 import org.apache.lucene.index.BinaryDocValues;
+import org.apache.lucene.index.DirectoryReader;
 import org.apache.lucene.index.FieldInfo;
-import org.apache.lucene.index.IndexReader;
+import org.apache.lucene.index.IndexWriter;
+import org.apache.lucene.index.IndexWriterConfig;
 import org.apache.lucene.index.LeafReader;
-import org.apache.lucene.index.MultiReader;
-import org.apache.lucene.index.SlowCompositeReaderWrapper;
 import org.apache.lucene.index.StoredFieldVisitor;
 import org.apache.lucene.index.Term;
 import org.apache.lucene.index.memory.MemoryIndex;
 import org.apache.lucene.search.BooleanClause;
 import org.apache.lucene.search.BooleanQuery;
 import org.apache.lucene.search.IndexSearcher;
+import org.apache.lucene.search.MatchNoDocsQuery;
 import org.apache.lucene.search.Query;
 import org.apache.lucene.search.TermQuery;
 import org.apache.lucene.search.Weight;
+import org.apache.lucene.store.RAMDirectory;
 import org.apache.lucene.util.Bits;
 import org.apache.lucene.util.BytesRef;
 import org.elasticsearch.ElasticsearchException;
@@ -56,16 +58,14 @@ import org.elasticsearch.common.xcontent.XContentFactory;
 import org.elasticsearch.common.xcontent.XContentHelper;
 import org.elasticsearch.common.xcontent.XContentParser;
 import org.elasticsearch.common.xcontent.XContentType;
-import org.elasticsearch.index.IndexSettings;
 import org.elasticsearch.index.analysis.FieldNameAnalyzer;
 import org.elasticsearch.index.mapper.DocumentMapper;
 import org.elasticsearch.index.mapper.DocumentMapperForType;
 import org.elasticsearch.index.mapper.MappedFieldType;
 import org.elasticsearch.index.mapper.MapperService;
-import org.elasticsearch.index.mapper.ParseContext;
 import org.elasticsearch.index.mapper.ParsedDocument;
-import org.elasticsearch.index.mapper.internal.SourceFieldMapper;
-import org.elasticsearch.index.mapper.internal.TypeFieldMapper;
+import org.elasticsearch.index.mapper.SourceFieldMapper;
+import org.elasticsearch.index.mapper.TypeFieldMapper;
 import org.elasticsearch.index.query.AbstractQueryBuilder;
 import org.elasticsearch.index.query.QueryBuilder;
 import org.elasticsearch.index.query.QueryParseContext;
@@ -74,16 +74,14 @@ import org.elasticsearch.index.query.QueryShardContext;
 import org.elasticsearch.index.query.QueryShardException;
 
 import java.io.IOException;
-import java.util.List;
 import java.util.Objects;
+import java.util.Optional;
 
 import static org.elasticsearch.index.mapper.SourceToParse.source;
 import static org.elasticsearch.percolator.PercolatorFieldMapper.parseQuery;
 
 public class PercolateQueryBuilder extends AbstractQueryBuilder<PercolateQueryBuilder> {
-
     public static final String NAME = "percolate";
-    public static final ParseField QUERY_NAME_FIELD = new ParseField(NAME);
 
     static final ParseField DOCUMENT_FIELD = new ParseField("document");
     private static final ParseField QUERY_FIELD = new ParseField("field");
@@ -235,7 +233,7 @@ public class PercolateQueryBuilder extends AbstractQueryBuilder<PercolateQueryBu
         builder.endObject();
     }
 
-    public static PercolateQueryBuilder fromXContent(QueryParseContext parseContext) throws IOException {
+    public static Optional<PercolateQueryBuilder> fromXContent(QueryParseContext parseContext) throws IOException {
         XContentParser parser = parseContext.parser();
         float boost = AbstractQueryBuilder.DEFAULT_BOOST;
 
@@ -316,7 +314,7 @@ public class PercolateQueryBuilder extends AbstractQueryBuilder<PercolateQueryBu
         }
         queryBuilder.queryName(queryName);
         queryBuilder.boost(boost);
-        return queryBuilder;
+        return Optional.of(queryBuilder);
     }
 
     @Override
@@ -358,17 +356,25 @@ public class PercolateQueryBuilder extends AbstractQueryBuilder<PercolateQueryBu
                     "indexed document [{}/{}/{}] couldn't be found", indexedDocumentIndex, indexedDocumentType, indexedDocumentId
             );
         }
+        if(getResponse.isSourceEmpty()) {
+            throw new IllegalArgumentException(
+                "indexed document [" + indexedDocumentIndex + "/" + indexedDocumentType + "/" + indexedDocumentId + "] source disabled"
+            );
+        }
         return new PercolateQueryBuilder(field, documentType, getResponse.getSourceAsBytesRef());
     }
 
     @Override
     protected Query doToQuery(QueryShardContext context) throws IOException {
+        // Call nowInMillis() so that this query becomes un-cacheable since we
+        // can't be sure that it doesn't use now or scripts
+        context.nowInMillis();
         if (indexedDocumentIndex != null || indexedDocumentType != null || indexedDocumentId != null) {
             throw new IllegalStateException("query builder must be rewritten first");
         }
 
         if (document == null) {
-            throw new IllegalStateException("nothing to percolator");
+            throw new IllegalStateException("no document to percolate");
         }
 
         MapperService mapperService = context.getMapperService();
@@ -387,7 +393,7 @@ public class PercolateQueryBuilder extends AbstractQueryBuilder<PercolateQueryBu
                 if (analyzer != null) {
                     return analyzer;
                 } else {
-                    return context.getAnalysisService().defaultIndexAnalyzer();
+                    return context.getIndexAnalyzers().getDefaultIndexAnalyzer();
                 }
             }
         };
@@ -401,36 +407,30 @@ public class PercolateQueryBuilder extends AbstractQueryBuilder<PercolateQueryBu
             docSearcher.setQueryCache(null);
         }
 
-        IndexSettings indexSettings = context.getIndexSettings();
-        boolean mapUnmappedFieldsAsString = indexSettings.getValue(PercolatorFieldMapper.INDEX_MAP_UNMAPPED_FIELDS_AS_STRING_SETTING);
-        return buildQuery(indexSettings.getIndexVersionCreated(), context, docSearcher, mapUnmappedFieldsAsString);
-    }
-
-    Query buildQuery(Version indexVersionCreated, QueryShardContext context, IndexSearcher docSearcher,
-                     boolean mapUnmappedFieldsAsString) throws IOException {
+        Version indexVersionCreated = context.getIndexSettings().getIndexVersionCreated();
+        boolean mapUnmappedFieldsAsString = context.getIndexSettings()
+                .getValue(PercolatorFieldMapper.INDEX_MAP_UNMAPPED_FIELDS_AS_STRING_SETTING);
+        // We have to make a copy of the QueryShardContext here so we can have a unfrozen version for parsing the legacy
+        // percolator queries
+        QueryShardContext percolateShardContext = new QueryShardContext(context);
         if (indexVersionCreated.onOrAfter(Version.V_5_0_0_alpha1)) {
             MappedFieldType fieldType = context.fieldMapper(field);
             if (fieldType == null) {
                 throw new QueryShardException(context, "field [" + field + "] does not exist");
             }
 
-            if (!(fieldType instanceof PercolatorFieldMapper.PercolatorFieldType)) {
+            if (!(fieldType instanceof PercolatorFieldMapper.FieldType)) {
                 throw new QueryShardException(context, "expected field [" + field +
                         "] to be of type [percolator], but is of type [" + fieldType.typeName() + "]");
             }
-            PercolatorFieldMapper.PercolatorFieldType pft = (PercolatorFieldMapper.PercolatorFieldType) fieldType;
-            PercolateQuery.Builder builder = new PercolateQuery.Builder(
-                    documentType, createStore(pft, context, mapUnmappedFieldsAsString), document, docSearcher
-            );
-            builder.extractQueryTermsQuery(pft.getExtractedTermsField(), pft.getUnknownQueryFieldName());
-            return builder.build();
+            PercolatorFieldMapper.FieldType pft = (PercolatorFieldMapper.FieldType) fieldType;
+            PercolateQuery.QueryStore queryStore = createStore(pft, percolateShardContext, mapUnmappedFieldsAsString);
+            return pft.percolateQuery(documentType, queryStore, document, docSearcher);
         } else {
             Query percolateTypeQuery = new TermQuery(new Term(TypeFieldMapper.NAME, MapperService.PERCOLATOR_LEGACY_TYPE_NAME));
-            PercolateQuery.Builder builder = new PercolateQuery.Builder(
-                    documentType, createLegacyStore(context, mapUnmappedFieldsAsString), document, docSearcher
-            );
-            builder.setPercolateTypeQuery(percolateTypeQuery);
-            return builder.build();
+            PercolateQuery.QueryStore queryStore = createLegacyStore(percolateShardContext, mapUnmappedFieldsAsString);
+            return new PercolateQuery(documentType, queryStore, document, percolateTypeQuery, docSearcher,
+                    new MatchNoDocsQuery("pre 5.0.0-alpha1 index, no verified matches"));
         }
     }
 
@@ -446,20 +446,14 @@ public class PercolateQueryBuilder extends AbstractQueryBuilder<PercolateQueryBu
         return document;
     }
 
-    private IndexSearcher createMultiDocumentSearcher(Analyzer analyzer, ParsedDocument doc) {
-        IndexReader[] memoryIndices = new IndexReader[doc.docs().size()];
-        List<ParseContext.Document> docs = doc.docs();
-        int rootDocIndex = docs.size() - 1;
-        assert rootDocIndex > 0;
-        for (int i = 0; i < docs.size(); i++) {
-            ParseContext.Document d = docs.get(i);
-            MemoryIndex memoryIndex = MemoryIndex.fromDocument(d, analyzer, true, false);
-            memoryIndices[i] = memoryIndex.createSearcher().getIndexReader();
-        }
-        try {
-            MultiReader mReader = new MultiReader(memoryIndices, true);
-            LeafReader slowReader = SlowCompositeReaderWrapper.wrap(mReader);
-            final IndexSearcher slowSearcher = new IndexSearcher(slowReader) {
+    static IndexSearcher createMultiDocumentSearcher(Analyzer analyzer, ParsedDocument doc) {
+        RAMDirectory ramDirectory = new RAMDirectory();
+        try (IndexWriter indexWriter = new IndexWriter(ramDirectory, new IndexWriterConfig(analyzer))) {
+            indexWriter.addDocuments(doc.docs());
+            indexWriter.commit();
+            DirectoryReader directoryReader = DirectoryReader.open(ramDirectory);
+            assert directoryReader.leaves().size() == 1 : "Expected single leaf, but got [" + directoryReader.leaves().size() + "]";
+            final IndexSearcher slowSearcher = new IndexSearcher(directoryReader) {
 
                 @Override
                 public Weight createNormalizedWeight(Query query, boolean needsScores) throws IOException {
@@ -477,17 +471,17 @@ public class PercolateQueryBuilder extends AbstractQueryBuilder<PercolateQueryBu
         }
     }
 
-    private static PercolateQuery.QueryStore createStore(PercolatorFieldMapper.PercolatorFieldType fieldType,
+    private static PercolateQuery.QueryStore createStore(PercolatorFieldMapper.FieldType fieldType,
                                                          QueryShardContext context,
                                                          boolean mapUnmappedFieldsAsString) {
         return ctx -> {
             LeafReader leafReader = ctx.reader();
-            BinaryDocValues binaryDocValues = leafReader.getBinaryDocValues(fieldType.getQueryBuilderFieldName());
+            BinaryDocValues binaryDocValues = leafReader.getBinaryDocValues(fieldType.queryBuilderField.name());
             if (binaryDocValues == null) {
                 return docId -> null;
             }
 
-            Bits bits = leafReader.getDocsWithField(fieldType.getQueryBuilderFieldName());
+            Bits bits = leafReader.getDocsWithField(fieldType.queryBuilderField.name());
             return docId -> {
                 if (bits.get(docId)) {
                     BytesRef qbSource = binaryDocValues.get(docId);
@@ -527,7 +521,8 @@ public class PercolateQueryBuilder extends AbstractQueryBuilder<PercolateQueryBu
                             currentFieldName = sourceParser.currentName();
                         } else if (token == XContentParser.Token.START_OBJECT) {
                             if ("query".equals(currentFieldName)) {
-                                return parseQuery(context, mapUnmappedFieldsAsString, sourceParser);
+                                QueryParseContext queryParseContext = context.newParseContext(sourceParser);
+                                return parseQuery(context, mapUnmappedFieldsAsString, queryParseContext, sourceParser);
                             } else {
                                 sourceParser.skipChildren();
                             }
@@ -541,7 +536,7 @@ public class PercolateQueryBuilder extends AbstractQueryBuilder<PercolateQueryBu
         };
     }
 
-    private final static class LegacyQueryFieldVisitor extends StoredFieldVisitor {
+    private static final class LegacyQueryFieldVisitor extends StoredFieldVisitor {
 
         private BytesArray source;
 

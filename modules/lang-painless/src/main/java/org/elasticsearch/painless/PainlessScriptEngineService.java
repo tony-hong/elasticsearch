@@ -22,13 +22,13 @@ package org.elasticsearch.painless;
 import org.apache.lucene.index.LeafReaderContext;
 import org.elasticsearch.SpecialPermission;
 import org.elasticsearch.common.component.AbstractComponent;
-import org.elasticsearch.common.inject.Inject;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.painless.Compiler.Loader;
 import org.elasticsearch.script.CompiledScript;
 import org.elasticsearch.script.ExecutableScript;
 import org.elasticsearch.script.LeafSearchScript;
 import org.elasticsearch.script.ScriptEngineService;
+import org.elasticsearch.script.ScriptException;
 import org.elasticsearch.script.SearchScript;
 import org.elasticsearch.search.lookup.SearchLookup;
 
@@ -38,7 +38,9 @@ import java.security.AccessController;
 import java.security.Permissions;
 import java.security.PrivilegedAction;
 import java.security.ProtectionDomain;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -50,11 +52,6 @@ public final class PainlessScriptEngineService extends AbstractComponent impleme
      * Standard name of the Painless language.
      */
     public static final String NAME = "painless";
-
-    /**
-     * Default compiler settings to be used.
-     */
-    private static final CompilerSettings DEFAULT_COMPILER_SETTINGS = new CompilerSettings();
 
     /**
      * Permissions context used during compilation.
@@ -73,12 +70,18 @@ public final class PainlessScriptEngineService extends AbstractComponent impleme
     }
 
     /**
+     * Default compiler settings to be used. Note that {@link CompilerSettings} is mutable but this instance shouldn't be mutated outside
+     * of {@link PainlessScriptEngineService#PainlessScriptEngineService(Settings)}.
+     */
+    private final CompilerSettings defaultCompilerSettings = new CompilerSettings();
+
+    /**
      * Constructor.
      * @param settings The settings to initialize the engine with.
      */
-    @Inject
     public PainlessScriptEngineService(final Settings settings) {
         super(settings);
+        defaultCompilerSettings.setRegexesEnabled(CompilerSettings.REGEX_ENABLED.get(settings));
     }
 
     /**
@@ -98,7 +101,7 @@ public final class PainlessScriptEngineService extends AbstractComponent impleme
     public String getExtension() {
         return NAME;
     }
-    
+
     /**
      * When a script is anonymous (inline), we give it this name.
      */
@@ -110,21 +113,34 @@ public final class PainlessScriptEngineService extends AbstractComponent impleme
 
         if (params.isEmpty()) {
             // Use the default settings.
-            compilerSettings = DEFAULT_COMPILER_SETTINGS;
+            compilerSettings = defaultCompilerSettings;
         } else {
             // Use custom settings specified by params.
             compilerSettings = new CompilerSettings();
-            Map<String, String> copy = new HashMap<>(params);
-            String value = copy.remove(CompilerSettings.MAX_LOOP_COUNTER);
 
+            // Except regexes enabled - this is a node level setting and can't be changed in the request.
+            compilerSettings.setRegexesEnabled(defaultCompilerSettings.areRegexesEnabled());
+
+            Map<String, String> copy = new HashMap<>(params);
+
+            String value = copy.remove(CompilerSettings.MAX_LOOP_COUNTER);
             if (value != null) {
                 compilerSettings.setMaxLoopCounter(Integer.parseInt(value));
             }
 
             value = copy.remove(CompilerSettings.PICKY);
-
             if (value != null) {
                 compilerSettings.setPicky(Boolean.parseBoolean(value));
+            }
+
+            value = copy.remove(CompilerSettings.INITIAL_CALL_SITE_DEPTH);
+            if (value != null) {
+                compilerSettings.setInitialCallSiteDepth(Integer.parseInt(value));
+            }
+
+            value = copy.remove(CompilerSettings.REGEX_ENABLED.getKey());
+            if (value != null) {
+                throw new IllegalArgumentException("[painless.regex.enabled] can only be set on node startup.");
             }
 
             if (!copy.isEmpty()) {
@@ -147,13 +163,18 @@ public final class PainlessScriptEngineService extends AbstractComponent impleme
             }
         });
 
-        // Drop all permissions to actually compile the code itself.
-        return AccessController.doPrivileged(new PrivilegedAction<Executable>() {
-            @Override
-            public Executable run() {
-                return Compiler.compile(loader, scriptName == null ? INLINE_NAME : scriptName, scriptSource, compilerSettings);
-            }
-        }, COMPILATION_CONTEXT);
+        try {
+            // Drop all permissions to actually compile the code itself.
+            return AccessController.doPrivileged(new PrivilegedAction<Executable>() {
+                @Override
+                public Executable run() {
+                    return Compiler.compile(loader, scriptName == null ? INLINE_NAME : scriptName, scriptSource, compilerSettings);
+                }
+            }, COMPILATION_CONTEXT);
+        // Note that it is safe to catch any of the following errors since Painless is stateless.
+        } catch (OutOfMemoryError | StackOverflowError | VerifyError | Exception e) {
+            throw convertToScriptException(scriptName == null ? scriptSource : scriptName, scriptSource, e);
+        }
     }
 
     /**
@@ -198,19 +219,62 @@ public final class PainlessScriptEngineService extends AbstractComponent impleme
     }
 
     /**
-     * Action taken when a script is removed from the cache.
-     * @param script The removed script.
-     */
-    @Override
-    public void scriptRemoved(final CompiledScript script) {
-        // Nothing to do.
-    }
-
-    /**
      * Action taken when the engine is closed.
      */
     @Override
     public void close() {
         // Nothing to do.
+    }
+
+    private ScriptException convertToScriptException(String scriptName, String scriptSource, Throwable t) {
+        // create a script stack: this is just the script portion
+        List<String> scriptStack = new ArrayList<>();
+        for (StackTraceElement element : t.getStackTrace()) {
+            if (WriterConstants.CLASS_NAME.equals(element.getClassName())) {
+                // found the script portion
+                int offset = element.getLineNumber();
+                if (offset == -1) {
+                    scriptStack.add("<<< unknown portion of script >>>");
+                } else {
+                    offset--; // offset is 1 based, line numbers must be!
+                    int startOffset = getPreviousStatement(scriptSource, offset);
+                    int endOffset = getNextStatement(scriptSource, offset);
+                    StringBuilder snippet = new StringBuilder();
+                    if (startOffset > 0) {
+                        snippet.append("... ");
+                    }
+                    snippet.append(scriptSource.substring(startOffset, endOffset));
+                    if (endOffset < scriptSource.length()) {
+                        snippet.append(" ...");
+                    }
+                    scriptStack.add(snippet.toString());
+                    StringBuilder pointer = new StringBuilder();
+                    if (startOffset > 0) {
+                        pointer.append("    ");
+                    }
+                    for (int i = startOffset; i < offset; i++) {
+                        pointer.append(' ');
+                    }
+                    pointer.append("^---- HERE");
+                    scriptStack.add(pointer.toString());
+                }
+                break;
+            }
+        }
+        throw new ScriptException("compile error", t, scriptStack, scriptSource, PainlessScriptEngineService.NAME);
+    }
+
+    // very simple heuristic: +/- 25 chars. can be improved later.
+    private int getPreviousStatement(String scriptSource, int offset) {
+        return Math.max(0, offset - 25);
+    }
+
+    private int getNextStatement(String scriptSource, int offset) {
+        return Math.min(scriptSource.length(), offset + 25);
+    }
+
+    @Override
+    public boolean isInlineScriptEnabled() {
+        return true;
     }
 }

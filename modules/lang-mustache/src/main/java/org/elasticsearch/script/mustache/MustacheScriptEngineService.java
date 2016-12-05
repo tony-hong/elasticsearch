@@ -18,20 +18,21 @@
  */
 package org.elasticsearch.script.mustache;
 
-import com.github.mustachejava.DefaultMustacheFactory;
 import com.github.mustachejava.Mustache;
+import com.github.mustachejava.MustacheFactory;
+import org.apache.logging.log4j.message.ParameterizedMessage;
+import org.apache.logging.log4j.util.Supplier;
 import org.elasticsearch.SpecialPermission;
 import org.elasticsearch.common.Nullable;
 import org.elasticsearch.common.component.AbstractComponent;
-import org.elasticsearch.common.inject.Inject;
 import org.elasticsearch.common.io.FastStringReader;
 import org.elasticsearch.common.io.UTF8StreamWriter;
 import org.elasticsearch.common.io.stream.BytesStreamOutput;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.script.CompiledScript;
 import org.elasticsearch.script.ExecutableScript;
+import org.elasticsearch.script.GeneralScriptException;
 import org.elasticsearch.script.ScriptEngineService;
-import org.elasticsearch.script.ScriptException;
 import org.elasticsearch.script.SearchScript;
 import org.elasticsearch.search.lookup.SearchLookup;
 
@@ -40,8 +41,9 @@ import java.lang.ref.SoftReference;
 import java.security.AccessController;
 import java.security.PrivilegedAction;
 import java.util.Collections;
-import java.util.List;
 import java.util.Map;
+
+import static org.elasticsearch.script.mustache.CustomMustacheFactory.CONTENT_TYPE_PARAM;
 
 /**
  * Main entry point handling template registration, compilation and
@@ -54,10 +56,6 @@ import java.util.Map;
 public final class MustacheScriptEngineService extends AbstractComponent implements ScriptEngineService {
 
     public static final String NAME = "mustache";
-
-    static final String CONTENT_TYPE_PARAM = "content_type";
-    static final String JSON_CONTENT_TYPE = "application/json";
-    static final String PLAIN_TEXT_CONTENT_TYPE = "text/plain";
 
     /** Thread local UTF8StreamWriter to store template execution results in, thread local to save object creation.*/
     private static ThreadLocal<SoftReference<UTF8StreamWriter>> utf8StreamWriter = new ThreadLocal<>();
@@ -77,7 +75,6 @@ public final class MustacheScriptEngineService extends AbstractComponent impleme
     /**
      * @param settings automatically wired by Guice.
      * */
-    @Inject
     public MustacheScriptEngineService(Settings settings) {
         super(settings);
     }
@@ -86,27 +83,21 @@ public final class MustacheScriptEngineService extends AbstractComponent impleme
      * Compile a template string to (in this case) a Mustache object than can
      * later be re-used for execution to fill in missing parameter values.
      *
-     * @param templateSource
-     *            a string representing the template to compile.
+     * @param templateSource a string representing the template to compile.
      * @return a compiled template object for later execution.
      * */
     @Override
     public Object compile(String templateName, String templateSource, Map<String, String> params) {
-        String contentType = params.getOrDefault(CONTENT_TYPE_PARAM, JSON_CONTENT_TYPE);
-        final DefaultMustacheFactory mustacheFactory;
-        switch (contentType){
-            case PLAIN_TEXT_CONTENT_TYPE:
-                mustacheFactory = new NoneEscapingMustacheFactory();
-                break;
-            case JSON_CONTENT_TYPE:
-            default:
-                // assume that the default is json encoding:
-                mustacheFactory = new JsonEscapingMustacheFactory();
-                break;
-        }
-        mustacheFactory.setObjectHandler(new CustomReflectionObjectHandler());
+        final MustacheFactory factory = createMustacheFactory(params);
         Reader reader = new FastStringReader(templateSource);
-        return mustacheFactory.compile(reader, "query-template");
+        return factory.compile(reader, "query-template");
+    }
+
+    private CustomMustacheFactory createMustacheFactory(Map<String, String> params) {
+        if (params == null || params.isEmpty() || params.containsKey(CONTENT_TYPE_PARAM) == false) {
+            return new CustomMustacheFactory();
+        }
+        return new CustomMustacheFactory(params.get(CONTENT_TYPE_PARAM));
     }
 
     @Override
@@ -133,11 +124,6 @@ public final class MustacheScriptEngineService extends AbstractComponent impleme
 
     @Override
     public void close() {
-        // Nothing to do here
-    }
-
-    @Override
-    public void scriptRemoved(CompiledScript script) {
         // Nothing to do here
     }
 
@@ -176,18 +162,20 @@ public final class MustacheScriptEngineService extends AbstractComponent impleme
                 if (sm != null) {
                     sm.checkPermission(SPECIAL_PERMISSION);
                 }
-                AccessController.doPrivileged(new PrivilegedAction<Void>() {
-                    @Override
-                    public Void run() {
-                        ((Mustache) template.compiled()).execute(writer, vars);
-                        return null;
-                    }
+                AccessController.doPrivileged((PrivilegedAction<Void>) () -> {
+                    ((Mustache) template.compiled()).execute(writer, vars);
+                    return null;
                 });
             } catch (Exception e) {
-                logger.error("Error running {}", e, template);
-                throw new ScriptException("Error running " + template, e);
+                logger.error((Supplier<?>) () -> new ParameterizedMessage("Error running {}", template), e);
+                throw new GeneralScriptException("Error running " + template, e);
             }
             return result.bytes();
         }
+    }
+
+    @Override
+    public boolean isInlineScriptEnabled() {
+        return true;
     }
 }

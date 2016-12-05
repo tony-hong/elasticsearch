@@ -23,10 +23,11 @@ import com.carrotsearch.randomizedtesting.annotations.ParametersFactory;
 import com.google.common.jimfs.Configuration;
 import com.google.common.jimfs.Jimfs;
 import org.apache.lucene.util.LuceneTestCase;
-import org.apache.lucene.util.SuppressForbidden;
 import org.elasticsearch.Version;
 import org.elasticsearch.cli.MockTerminal;
-import org.elasticsearch.cli.UserError;
+import org.elasticsearch.cli.Terminal;
+import org.elasticsearch.cli.UserException;
+import org.elasticsearch.common.SuppressForbidden;
 import org.elasticsearch.common.collect.Tuple;
 import org.elasticsearch.common.io.PathUtils;
 import org.elasticsearch.common.io.PathUtilsForTesting;
@@ -53,9 +54,11 @@ import java.nio.file.Path;
 import java.nio.file.SimpleFileVisitor;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.attribute.BasicFileAttributes;
+import java.nio.file.attribute.GroupPrincipal;
 import java.nio.file.attribute.PosixFileAttributeView;
 import java.nio.file.attribute.PosixFileAttributes;
 import java.nio.file.attribute.PosixFilePermission;
+import java.nio.file.attribute.UserPrincipal;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -63,13 +66,14 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.function.Function;
-import java.util.function.Supplier;
 import java.util.stream.Collectors;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
+import static org.hamcrest.CoreMatchers.containsString;
 import static org.hamcrest.CoreMatchers.equalTo;
 import static org.hamcrest.Matchers.containsInAnyOrder;
+import static org.hamcrest.Matchers.not;
 
 @LuceneTestCase.SuppressFileSystems("*")
 public class InstallPluginCommandTests extends ESTestCase {
@@ -179,6 +183,10 @@ public class InstallPluginCommandTests extends ESTestCase {
 
     /** creates a plugin .zip and returns the url for testing */
     static String createPlugin(String name, Path structure) throws IOException {
+        return createPlugin(name, structure, false);
+    }
+
+    static String createPlugin(String name, Path structure, boolean createSecurityPolicyFile) throws IOException {
         PluginTestUtil.writeProperties(structure,
             "description", "fake desc",
             "name", name,
@@ -186,6 +194,10 @@ public class InstallPluginCommandTests extends ESTestCase {
             "elasticsearch.version", Version.CURRENT.toString(),
             "java.version", System.getProperty("java.specification.version"),
             "classname", "FakePlugin");
+        if (createSecurityPolicyFile) {
+            String securityPolicyContent = "grant {\n  permission java.lang.RuntimePermission \"setFactory\";\n};\n";
+            Files.write(structure.resolve("plugin-security.policy"), securityPolicyContent.getBytes(StandardCharsets.UTF_8));
+        }
         writeJar(structure.resolve("plugin.jar"), "FakePlugin");
         return writeZip(structure, "elasticsearch");
     }
@@ -243,7 +255,7 @@ public class InstallPluginCommandTests extends ESTestCase {
                     assertFalse("not a dir", Files.isDirectory(file));
                     if (isPosix) {
                         PosixFileAttributes attributes = Files.readAttributes(file, PosixFileAttributes.class);
-                        assertEquals(InstallPluginCommand.DIR_AND_EXECUTABLE_PERMS, attributes.permissions());
+                        assertEquals(InstallPluginCommand.BIN_FILES_PERMS, attributes.permissions());
                     }
                 }
             }
@@ -253,18 +265,33 @@ public class InstallPluginCommandTests extends ESTestCase {
             assertTrue("config dir exists", Files.exists(configDir));
             assertTrue("config is a dir", Files.isDirectory(configDir));
 
+            UserPrincipal user = null;
+            GroupPrincipal group = null;
+
             if (isPosix) {
-                Path configRoot = env.configFile();
                 PosixFileAttributes configAttributes =
-                    Files.getFileAttributeView(configRoot, PosixFileAttributeView.class).readAttributes();
+                        Files.getFileAttributeView(env.configFile(), PosixFileAttributeView.class).readAttributes();
+                user = configAttributes.owner();
+                group = configAttributes.group();
+
                 PosixFileAttributes attributes = Files.getFileAttributeView(configDir, PosixFileAttributeView.class).readAttributes();
-                assertThat(attributes.owner(), equalTo(configAttributes.owner()));
-                assertThat(attributes.group(), equalTo(configAttributes.group()));
+                assertThat(attributes.owner(), equalTo(user));
+                assertThat(attributes.group(), equalTo(group));
             }
 
             try (DirectoryStream<Path> stream = Files.newDirectoryStream(configDir)) {
                 for (Path file : stream) {
                     assertFalse("not a dir", Files.isDirectory(file));
+
+                    if (isPosix) {
+                        PosixFileAttributes attributes = Files.readAttributes(file, PosixFileAttributes.class);
+                        if (user != null) {
+                            assertThat(attributes.owner(), equalTo(user));
+                        }
+                        if (group != null) {
+                            assertThat(attributes.group(), equalTo(group));
+                        }
+                    }
                 }
             }
         }
@@ -279,6 +306,12 @@ public class InstallPluginCommandTests extends ESTestCase {
                 }
             }
         }
+    }
+
+    public void testMissingPluginId() throws IOException {
+        final Tuple<Path, Environment> env = createEnv(fs, temp);
+        final UserException e = expectThrows(UserException.class, () -> installPlugin(null, env.v1()));
+        assertTrue(e.getMessage(), e.getMessage().contains("plugin id is required"));
     }
 
     public void testSomethingWorks() throws Exception {
@@ -308,6 +341,12 @@ public class InstallPluginCommandTests extends ESTestCase {
         assertTrue(e.getMessage(), e.getMessage().contains("no protocol"));
     }
 
+    public void testUnknownPlugin() throws Exception {
+        Tuple<Path, Environment> env = createEnv(fs, temp);
+        UserException e = expectThrows(UserException.class, () -> installPlugin("foo", env.v1()));
+        assertTrue(e.getMessage(), e.getMessage().contains("Unknown plugin foo"));
+    }
+
     public void testPluginsDirMissing() throws Exception {
         Tuple<Path, Environment> env = createEnv(fs, temp);
         Files.delete(env.v2().pluginsFile());
@@ -333,8 +372,8 @@ public class InstallPluginCommandTests extends ESTestCase {
     public void testBuiltinModule() throws Exception {
         Tuple<Path, Environment> env = createEnv(fs, temp);
         Path pluginDir = createPluginDir(temp);
-        String pluginZip = createPlugin("lang-groovy", pluginDir);
-        UserError e = expectThrows(UserError.class, () -> installPlugin(pluginZip, env.v1()));
+        String pluginZip = createPlugin("lang-painless", pluginDir);
+        UserException e = expectThrows(UserException.class, () -> installPlugin(pluginZip, env.v1()));
         assertTrue(e.getMessage(), e.getMessage().contains("is a system module"));
         assertInstallCleaned(env.v2());
     }
@@ -369,7 +408,7 @@ public class InstallPluginCommandTests extends ESTestCase {
         Path pluginDir = createPluginDir(temp);
         String pluginZip = createPlugin("fake", pluginDir);
         installPlugin(pluginZip, env.v1());
-        UserError e = expectThrows(UserError.class, () -> installPlugin(pluginZip, env.v1()));
+        UserException e = expectThrows(UserException.class, () -> installPlugin(pluginZip, env.v1()));
         assertTrue(e.getMessage(), e.getMessage().contains("already exists"));
         assertInstallCleaned(env.v2());
     }
@@ -391,7 +430,7 @@ public class InstallPluginCommandTests extends ESTestCase {
         Path binDir = pluginDir.resolve("bin");
         Files.createFile(binDir);
         String pluginZip = createPlugin("fake", pluginDir);
-        UserError e = expectThrows(UserError.class, () -> installPlugin(pluginZip, env.v1()));
+        UserException e = expectThrows(UserException.class, () -> installPlugin(pluginZip, env.v1()));
         assertTrue(e.getMessage(), e.getMessage().contains("not a directory"));
         assertInstallCleaned(env.v2());
     }
@@ -403,7 +442,7 @@ public class InstallPluginCommandTests extends ESTestCase {
         Files.createDirectories(dirInBinDir);
         Files.createFile(dirInBinDir.resolve("somescript"));
         String pluginZip = createPlugin("fake", pluginDir);
-        UserError e = expectThrows(UserError.class, () -> installPlugin(pluginZip, env.v1()));
+        UserException e = expectThrows(UserException.class, () -> installPlugin(pluginZip, env.v1()));
         assertTrue(e.getMessage(), e.getMessage().contains("Directories not allowed in bin dir for plugin"));
         assertInstallCleaned(env.v2());
     }
@@ -436,6 +475,34 @@ public class InstallPluginCommandTests extends ESTestCase {
             installPlugin(pluginZip, env.v1());
             assertPlugin("fake", pluginDir, env.v2());
         }
+    }
+
+    public void testPlatformBinPermissions() throws Exception {
+        assumeTrue("posix filesystem", isPosix);
+        Tuple<Path, Environment> env = createEnv(fs, temp);
+        Path pluginDir = createPluginDir(temp);
+        Path platformDir = pluginDir.resolve("platform");
+        Path platformNameDir = platformDir.resolve("linux-x86_64");
+        Path platformBinDir = platformNameDir.resolve("bin");
+        Files.createDirectories(platformBinDir);
+        Path programFile = Files.createFile(platformBinDir.resolve("someprogram"));
+        // a file created with Files.createFile() should not have execute permissions
+        Set<PosixFilePermission> sourcePerms = Files.getPosixFilePermissions(programFile);
+        assertFalse(sourcePerms.contains(PosixFilePermission.OWNER_EXECUTE));
+        assertFalse(sourcePerms.contains(PosixFilePermission.GROUP_EXECUTE));
+        assertFalse(sourcePerms.contains(PosixFilePermission.OTHERS_EXECUTE));
+        String pluginZip = createPlugin("fake", pluginDir);
+        installPlugin(pluginZip, env.v1());
+        assertPlugin("fake", pluginDir, env.v2());
+        // check that the installed program has execute permissions, even though the one added to the plugin didn't
+        Path installedPlatformBinDir = env.v2().pluginsFile().resolve("fake").resolve("platform").resolve("linux-x86_64").resolve("bin");
+        assertTrue(Files.isDirectory(installedPlatformBinDir));
+        Path installedProgramFile = installedPlatformBinDir.resolve("someprogram");
+        assertTrue(Files.isRegularFile(installedProgramFile));
+        Set<PosixFilePermission> installedPerms = Files.getPosixFilePermissions(installedProgramFile);
+        assertTrue(installedPerms.contains(PosixFilePermission.OWNER_EXECUTE));
+        assertTrue(installedPerms.contains(PosixFilePermission.GROUP_EXECUTE));
+        assertTrue(installedPerms.contains(PosixFilePermission.OTHERS_EXECUTE));
     }
 
     public void testConfig() throws Exception {
@@ -474,7 +541,7 @@ public class InstallPluginCommandTests extends ESTestCase {
         Path configDir = pluginDir.resolve("config");
         Files.createFile(configDir);
         String pluginZip = createPlugin("fake", pluginDir);
-        UserError e = expectThrows(UserError.class, () -> installPlugin(pluginZip, env.v1()));
+        UserException e = expectThrows(UserException.class, () -> installPlugin(pluginZip, env.v1()));
         assertTrue(e.getMessage(), e.getMessage().contains("not a directory"));
         assertInstallCleaned(env.v2());
     }
@@ -486,7 +553,7 @@ public class InstallPluginCommandTests extends ESTestCase {
         Files.createDirectories(dirInConfigDir);
         Files.createFile(dirInConfigDir.resolve("myconfig.yml"));
         String pluginZip = createPlugin("fake", pluginDir);
-        UserError e = expectThrows(UserError.class, () -> installPlugin(pluginZip, env.v1()));
+        UserException e = expectThrows(UserException.class, () -> installPlugin(pluginZip, env.v1()));
         assertTrue(e.getMessage(), e.getMessage().contains("Directories not allowed in config dir for plugin"));
         assertInstallCleaned(env.v2());
     }
@@ -518,7 +585,7 @@ public class InstallPluginCommandTests extends ESTestCase {
         Path pluginDir = createPluginDir(temp);
         Files.createFile(pluginDir.resolve(PluginInfo.ES_PLUGIN_PROPERTIES));
         String pluginZip = writeZip(pluginDir, null);
-        UserError e = expectThrows(UserError.class, () -> installPlugin(pluginZip, env.v1()));
+        UserException e = expectThrows(UserException.class, () -> installPlugin(pluginZip, env.v1()));
         assertTrue(e.getMessage(), e.getMessage().contains("`elasticsearch` directory is missing in the plugin zip"));
         assertInstallCleaned(env.v2());
     }
@@ -562,7 +629,56 @@ public class InstallPluginCommandTests extends ESTestCase {
         assertTrue(terminal.getOutput(), terminal.getOutput().contains("x-pack"));
     }
 
-    // TODO: test batch flag?
+    public void testInstallMisspelledOfficialPlugins() throws Exception {
+        Tuple<Path, Environment> env = createEnv(fs, temp);
+        UserException e = expectThrows(UserException.class, () -> installPlugin("xpack", env.v1()));
+        assertThat(e.getMessage(), containsString("Unknown plugin xpack, did you mean [x-pack]?"));
+
+        e = expectThrows(UserException.class, () -> installPlugin("analysis-smartnc", env.v1()));
+        assertThat(e.getMessage(), containsString("Unknown plugin analysis-smartnc, did you mean [analysis-smartcn]?"));
+
+        e = expectThrows(UserException.class, () -> installPlugin("repository", env.v1()));
+        assertThat(e.getMessage(), containsString("Unknown plugin repository, did you mean any of [repository-s3, repository-gcs]?"));
+
+        e = expectThrows(UserException.class, () -> installPlugin("unknown_plugin", env.v1()));
+        assertThat(e.getMessage(), containsString("Unknown plugin unknown_plugin"));
+    }
+
+    public void testBatchFlag() throws Exception {
+        MockTerminal terminal = new MockTerminal();
+        installPlugin(terminal, true);
+        assertThat(terminal.getOutput(), containsString("WARNING: plugin requires additional permissions"));
+    }
+
+    public void testQuietFlagDisabled() throws Exception {
+        MockTerminal terminal = new MockTerminal();
+        terminal.setVerbosity(randomFrom(Terminal.Verbosity.NORMAL, Terminal.Verbosity.VERBOSE));
+        installPlugin(terminal, false);
+        assertThat(terminal.getOutput(), containsString("100%"));
+    }
+
+    public void testQuietFlagEnabled() throws Exception {
+        MockTerminal terminal = new MockTerminal();
+        terminal.setVerbosity(Terminal.Verbosity.SILENT);
+        installPlugin(terminal, false);
+        assertThat(terminal.getOutput(), not(containsString("100%")));
+    }
+
+    private void installPlugin(MockTerminal terminal, boolean isBatch) throws Exception {
+        Tuple<Path, Environment> env = createEnv(fs, temp);
+        Path pluginDir = createPluginDir(temp);
+        // if batch is enabled, we also want to add a security policy
+        String pluginZip = createPlugin("fake", pluginDir, isBatch);
+
+        Map<String, String> settings = new HashMap<>();
+        settings.put("path.home", env.v1().toString());
+        new InstallPluginCommand() {
+            @Override
+            void jarHellCheck(Path candidate, Path pluginsDir) throws Exception {
+            }
+        }.execute(terminal, pluginZip, isBatch, settings);
+    }
+
     // TODO: test checksum (need maven/official below)
     // TODO: test maven, official, and staging install...need tests with fixtures...
 }

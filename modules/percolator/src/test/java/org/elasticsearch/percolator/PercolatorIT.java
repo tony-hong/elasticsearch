@@ -26,6 +26,7 @@ import org.elasticsearch.action.admin.indices.alias.Alias;
 import org.elasticsearch.action.admin.indices.alias.IndicesAliasesResponse;
 import org.elasticsearch.action.search.SearchResponse;
 import org.elasticsearch.action.support.IndicesOptions;
+import org.elasticsearch.action.support.WriteRequest.RefreshPolicy;
 import org.elasticsearch.client.Requests;
 import org.elasticsearch.common.geo.builders.ShapeBuilders;
 import org.elasticsearch.common.lucene.search.function.CombineFunction;
@@ -41,7 +42,10 @@ import org.elasticsearch.index.query.QueryBuilders;
 import org.elasticsearch.index.query.QueryShardException;
 import org.elasticsearch.index.query.functionscore.WeightBuilder;
 import org.elasticsearch.plugins.Plugin;
-import org.elasticsearch.search.highlight.HighlightBuilder;
+import org.elasticsearch.script.MockScriptPlugin;
+import org.elasticsearch.script.Script;
+import org.elasticsearch.script.ScriptService;
+import org.elasticsearch.search.fetch.subphase.highlight.HighlightBuilder;
 import org.elasticsearch.test.ESIntegTestCase;
 
 import java.io.IOException;
@@ -58,13 +62,13 @@ import java.util.Map;
 import java.util.NavigableSet;
 import java.util.Set;
 import java.util.TreeSet;
+import java.util.function.Function;
 
 import static org.elasticsearch.percolator.PercolateSourceBuilder.docBuilder;
 import static org.elasticsearch.common.xcontent.XContentFactory.jsonBuilder;
 import static org.elasticsearch.common.xcontent.XContentFactory.smileBuilder;
 import static org.elasticsearch.common.xcontent.XContentFactory.yamlBuilder;
 import static org.elasticsearch.index.query.QueryBuilders.boolQuery;
-import static org.elasticsearch.index.query.QueryBuilders.constantScoreQuery;
 import static org.elasticsearch.index.query.QueryBuilders.functionScoreQuery;
 import static org.elasticsearch.index.query.QueryBuilders.geoShapeQuery;
 import static org.elasticsearch.index.query.QueryBuilders.hasChildQuery;
@@ -88,18 +92,16 @@ import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.instanceOf;
 import static org.hamcrest.Matchers.nullValue;
 
-/**
- *
- */
 public class PercolatorIT extends ESIntegTestCase {
 
-    private final static String INDEX_NAME = "queries";
-    private final static String TYPE_NAME = "query";
+    private static final String INDEX_NAME = "queries";
+    private static final String TYPE_NAME = "query";
 
     @Override
     protected Collection<Class<? extends Plugin>> nodePlugins() {
         return Collections.singleton(PercolatorPlugin.class);
     }
+
 
     @Override
     protected Collection<Class<? extends Plugin>> transportClientPlugins() {
@@ -240,7 +242,7 @@ public class PercolatorIT extends ESIntegTestCase {
         client().admin().indices().prepareCreate(INDEX_NAME)
                 .setSettings(Settings.builder().put("index.number_of_shards", 2))
                 .addMapping(TYPE_NAME, "query", "type=percolator")
-                .addMapping("type", "field1", "type=string")
+                .addMapping("type", "field1", "type=text")
                 .execute().actionGet();
         ensureGreen();
 
@@ -294,8 +296,8 @@ public class PercolatorIT extends ESIntegTestCase {
                         .field("color", "blue")
                         .field("query", termQuery("field1", "value1"))
                         .endObject())
-                .setRefresh(true)
-                .execute().actionGet();
+                .setRefreshPolicy(RefreshPolicy.IMMEDIATE)
+                .get();
 
         cluster().wipeIndices("test");
         createIndex("test");
@@ -308,8 +310,8 @@ public class PercolatorIT extends ESIntegTestCase {
                         .field("color", "blue")
                         .field("query", termQuery("field1", "value1"))
                         .endObject())
-                .setRefresh(true)
-                .execute().actionGet();
+                .setRefreshPolicy(RefreshPolicy.IMMEDIATE)
+                .get();
     }
 
     // see #2814
@@ -338,8 +340,8 @@ public class PercolatorIT extends ESIntegTestCase {
                         .field("source", "productizer")
                         .field("query", QueryBuilders.constantScoreQuery(QueryBuilders.queryStringQuery("filingcategory:s")))
                         .endObject())
-                .setRefresh(true)
-                .execute().actionGet();
+                .setRefreshPolicy(RefreshPolicy.IMMEDIATE)
+                .get();
         refresh();
 
         PercolateResponse percolate = preparePercolate(client())
@@ -417,8 +419,8 @@ public class PercolatorIT extends ESIntegTestCase {
                         .field("color", "blue")
                         .field("query", termQuery("field1", "value1"))
                         .endObject())
-                .setRefresh(true)
-                .execute().actionGet();
+                .setRefreshPolicy(RefreshPolicy.IMMEDIATE)
+                .get();
 
         logger.info("--> register a query 2");
         client().prepareIndex(INDEX_NAME, TYPE_NAME, "bubu")
@@ -426,8 +428,8 @@ public class PercolatorIT extends ESIntegTestCase {
                         .field("color", "green")
                         .field("query", termQuery("field1", "value2"))
                         .endObject())
-                .setRefresh(true)
-                .execute().actionGet();
+                .setRefreshPolicy(RefreshPolicy.IMMEDIATE)
+                .get();
 
         PercolateResponse percolate = preparePercolate(client())
                 .setIndices(INDEX_NAME).setDocumentType("type1")
@@ -461,8 +463,8 @@ public class PercolatorIT extends ESIntegTestCase {
                         .field("color", "blue")
                         .field("query", termQuery("field1", "value1"))
                         .endObject())
-                .setRefresh(true)
-                .execute().actionGet();
+                .setRefreshPolicy(RefreshPolicy.IMMEDIATE)
+                .get();
 
         PercolateResponse percolate = preparePercolate(client())
                 .setIndices(INDEX_NAME).setDocumentType("type1")
@@ -478,8 +480,8 @@ public class PercolatorIT extends ESIntegTestCase {
                         .field("color", "green")
                         .field("query", termQuery("field1", "value2"))
                         .endObject())
-                .setRefresh(true)
-                .execute().actionGet();
+                .setRefreshPolicy(RefreshPolicy.IMMEDIATE)
+                .get();
 
         percolate = preparePercolate(client())
                 .setIndices(INDEX_NAME).setDocumentType("type1")
@@ -495,8 +497,8 @@ public class PercolatorIT extends ESIntegTestCase {
                         .field("color", "red")
                         .field("query", termQuery("field1", "value2"))
                         .endObject())
-                .setRefresh(true)
-                .execute().actionGet();
+                .setRefreshPolicy(RefreshPolicy.IMMEDIATE)
+                .get();
 
         PercolateSourceBuilder sourceBuilder = new PercolateSourceBuilder()
                 .setDoc(docBuilder().setDoc(jsonBuilder().startObject().field("field1", "value2").endObject()))
@@ -510,7 +512,7 @@ public class PercolatorIT extends ESIntegTestCase {
         assertThat(convertFromTextArray(percolate.getMatches(), INDEX_NAME), arrayContaining("susu"));
 
         logger.info("--> deleting query 1");
-        client().prepareDelete(INDEX_NAME, TYPE_NAME, "kuku").setRefresh(true).execute().actionGet();
+        client().prepareDelete(INDEX_NAME, TYPE_NAME, "kuku").setRefreshPolicy(RefreshPolicy.IMMEDIATE).get();
 
         percolate = preparePercolate(client())
                 .setIndices(INDEX_NAME).setDocumentType("type1")
@@ -1461,8 +1463,8 @@ public class PercolatorIT extends ESIntegTestCase {
                                 .must(QueryBuilders.queryStringQuery("root"))
                                 .must(QueryBuilders.termQuery("message", "tree"))))
                         .endObject())
-                .setRefresh(true)
-                .execute().actionGet();
+                .setRefreshPolicy(RefreshPolicy.IMMEDIATE)
+                .get();
         refresh();
 
         PercolateResponse percolate = preparePercolate(client())
@@ -1553,31 +1555,6 @@ public class PercolatorIT extends ESIntegTestCase {
         } catch (MapperParsingException e) {
             assertThat(e.getRootCause(), instanceOf(QueryShardException.class));
         }
-    }
-
-    public void testPercolatorQueryWithNowRange() throws Exception {
-        client().admin().indices().prepareCreate(INDEX_NAME)
-                .addMapping("my-type", "timestamp", "type=date,format=epoch_millis")
-                .addMapping(TYPE_NAME, "query", "type=percolator")
-                .get();
-        ensureGreen();
-
-        client().prepareIndex(INDEX_NAME, TYPE_NAME, "1")
-                .setSource(jsonBuilder().startObject().field("query", rangeQuery("timestamp").from("now-1d").to("now")).endObject())
-                .get();
-        client().prepareIndex(INDEX_NAME, TYPE_NAME, "2")
-                .setSource(jsonBuilder().startObject().field("query", constantScoreQuery(rangeQuery("timestamp").from("now-1d").to("now"))).endObject())
-                .get();
-        refresh();
-
-        logger.info("--> Percolate doc with field1=b");
-        PercolateResponse response = preparePercolate(client())
-                .setIndices(INDEX_NAME).setDocumentType("my-type")
-                .setPercolateDoc(docBuilder().setDoc("timestamp", System.currentTimeMillis()))
-                .get();
-        assertMatchCount(response, 2L);
-        assertThat(response.getMatches(), arrayWithSize(2));
-        assertThat(convertFromTextArray(response.getMatches(), INDEX_NAME), arrayContainingInAnyOrder("1", "2"));
     }
 
     void initNestedIndexAndPercolation() throws IOException {
@@ -1804,16 +1781,15 @@ public class PercolatorIT extends ESIntegTestCase {
         assertThat(response1.getMatches()[0].getId().string(), equalTo("1"));
     }
 
-    public void testParentChild() throws Exception {
-        // We don't fail p/c queries, but those queries are unusable because only a single document can be provided in
-        // the percolate api
-
+    public void testFailParentChild() throws Exception {
         assertAcked(prepareCreate(INDEX_NAME)
                 .addMapping(TYPE_NAME, "query", "type=percolator")
                 .addMapping("child", "_parent", "type=parent").addMapping("parent"));
-        client().prepareIndex(INDEX_NAME, TYPE_NAME, "1")
+        Exception e = expectThrows(MapperParsingException.class, () -> client().prepareIndex(INDEX_NAME, TYPE_NAME, "1")
                 .setSource(jsonBuilder().startObject().field("query", hasChildQuery("child", matchAllQuery(), ScoreMode.None)).endObject())
-                .execute().actionGet();
+                .get());
+        assertThat(e.getCause(), instanceOf(IllegalArgumentException.class));
+        assertThat(e.getCause().getMessage(), equalTo("the [has_child] query is unsupported inside a percolator query"));
     }
 
     public void testPercolateDocumentWithParentField() throws Exception {

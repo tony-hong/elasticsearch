@@ -28,8 +28,6 @@ import java.io.IOException;
 import java.util.HashMap;
 import java.util.Map;
 
-/**
- */
 public class FieldStatsShardResponse extends BroadcastShardResponse {
 
     private Map<String, FieldStats<?>> fieldStats;
@@ -45,7 +43,6 @@ public class FieldStatsShardResponse extends BroadcastShardResponse {
     public Map<String, FieldStats<?>> getFieldStats() {
         return fieldStats;
     }
-
 
     @Override
     public void readFrom(StreamInput in) throws IOException {

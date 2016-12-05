@@ -21,9 +21,10 @@ package org.elasticsearch.rest.action.cat;
 
 import org.elasticsearch.action.ShardOperationFailedException;
 import org.elasticsearch.action.admin.indices.recovery.RecoveryResponse;
-import org.elasticsearch.cluster.metadata.SnapshotId;
 import org.elasticsearch.cluster.node.DiscoveryNode;
-import org.elasticsearch.cluster.routing.RestoreSource;
+import org.elasticsearch.cluster.routing.RecoverySource;
+import org.elasticsearch.cluster.routing.RecoverySource.SnapshotRecoverySource;
+import org.elasticsearch.cluster.routing.TestShardRouting;
 import org.elasticsearch.common.Randomness;
 import org.elasticsearch.common.Table;
 import org.elasticsearch.common.settings.Settings;
@@ -35,6 +36,7 @@ import org.elasticsearch.rest.RestController;
 import org.elasticsearch.test.ESTestCase;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
@@ -48,8 +50,8 @@ public class RestRecoveryActionTests extends ESTestCase {
 
     public void testRestRecoveryAction() {
         final Settings settings = Settings.EMPTY;
-        final RestController restController = new RestController(settings);
-        final RestRecoveryAction action = new RestRecoveryAction(settings, restController, restController, null);
+        final RestController restController = new RestController(settings, Collections.emptySet(), null);
+        final RestRecoveryAction action = new RestRecoveryAction(settings, restController, restController);
         final int totalShards = randomIntBetween(1, 32);
         final int successfulShards = Math.max(0, totalShards - randomIntBetween(1, 2));
         final int failedShards = totalShards - successfulShards;
@@ -63,7 +65,7 @@ public class RestRecoveryActionTests extends ESTestCase {
             final RecoveryState.Timer timer = mock(RecoveryState.Timer.class);
             when(timer.time()).thenReturn((long)randomIntBetween(1000000, 10 * 1000000));
             when(state.getTimer()).thenReturn(timer);
-            when(state.getType()).thenReturn(randomFrom(RecoveryState.Type.values()));
+            when(state.getRecoverySource()).thenReturn(TestShardRouting.randomRecoverySource());
             when(state.getStage()).thenReturn(randomFrom(RecoveryState.Stage.values()));
             final DiscoveryNode sourceNode = randomBoolean() ? mock(DiscoveryNode.class) : null;
             if (sourceNode != null) {
@@ -73,14 +75,6 @@ public class RestRecoveryActionTests extends ESTestCase {
             final DiscoveryNode targetNode = mock(DiscoveryNode.class);
             when(targetNode.getHostName()).thenReturn(randomAsciiOfLength(8));
             when(state.getTargetNode()).thenReturn(targetNode);
-
-            final RestoreSource restoreSource = randomBoolean() ? mock(RestoreSource.class) : null;
-            if (restoreSource != null) {
-                final SnapshotId snapshotId = mock(SnapshotId.class);
-                when(snapshotId.getRepository()).thenReturn(randomAsciiOfLength(8));
-                when(snapshotId.getSnapshot()).thenReturn(randomAsciiOfLength(8));
-                when(restoreSource.snapshotId()).thenReturn(snapshotId);
-            }
 
             RecoveryState.Index index = mock(RecoveryState.Index.class);
 
@@ -158,7 +152,7 @@ public class RestRecoveryActionTests extends ESTestCase {
             assertThat(cells.get(0).value, equalTo("index"));
             assertThat(cells.get(1).value, equalTo(i));
             assertThat(cells.get(2).value, equalTo(new TimeValue(state.getTimer().time())));
-            assertThat(cells.get(3).value, equalTo(state.getType().name().toLowerCase(Locale.ROOT)));
+            assertThat(cells.get(3).value, equalTo(state.getRecoverySource().getType().name().toLowerCase(Locale.ROOT)));
             assertThat(cells.get(4).value, equalTo(state.getStage().name().toLowerCase(Locale.ROOT)));
             assertThat(cells.get(5).value, equalTo(state.getSourceNode() == null ? "n/a" : state.getSourceNode().getHostName()));
             assertThat(cells.get(6).value, equalTo(state.getSourceNode() == null ? "n/a" : state.getSourceNode().getName()));
@@ -166,10 +160,14 @@ public class RestRecoveryActionTests extends ESTestCase {
             assertThat(cells.get(8).value, equalTo(state.getTargetNode().getName()));
             assertThat(
                     cells.get(9).value,
-                    equalTo(state.getRestoreSource() == null ? "n/a" : state.getRestoreSource().snapshotId().getRepository()));
+                    equalTo(state.getRecoverySource() == null || state.getRecoverySource().getType() != RecoverySource.Type.SNAPSHOT ?
+                        "n/a" :
+                        ((SnapshotRecoverySource) state.getRecoverySource()).snapshot().getRepository()));
             assertThat(
                     cells.get(10).value,
-                    equalTo(state.getRestoreSource() == null ? "n/a" : state.getRestoreSource().snapshotId().getSnapshot()));
+                    equalTo(state.getRecoverySource() == null || state.getRecoverySource().getType() != RecoverySource.Type.SNAPSHOT ?
+                        "n/a" :
+                        ((SnapshotRecoverySource) state.getRecoverySource()).snapshot().getSnapshotId().getName()));
             assertThat(cells.get(11).value, equalTo(state.getIndex().totalRecoverFiles()));
             assertThat(cells.get(12).value, equalTo(state.getIndex().recoveredFileCount()));
             assertThat(cells.get(13).value, equalTo(percent(state.getIndex().recoveredFilesPercent())));

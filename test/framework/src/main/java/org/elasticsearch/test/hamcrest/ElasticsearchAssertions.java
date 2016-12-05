@@ -30,6 +30,7 @@ import org.elasticsearch.action.ShardOperationFailedException;
 import org.elasticsearch.action.admin.cluster.health.ClusterHealthRequestBuilder;
 import org.elasticsearch.action.admin.cluster.health.ClusterHealthResponse;
 import org.elasticsearch.action.admin.indices.alias.exists.AliasesExistResponse;
+import org.elasticsearch.action.admin.indices.create.CreateIndexResponse;
 import org.elasticsearch.action.admin.indices.delete.DeleteIndexRequestBuilder;
 import org.elasticsearch.action.admin.indices.delete.DeleteIndexResponse;
 import org.elasticsearch.action.admin.indices.template.get.GetIndexTemplatesResponse;
@@ -60,7 +61,6 @@ import org.elasticsearch.search.SearchModule;
 import org.elasticsearch.search.suggest.Suggest;
 import org.elasticsearch.test.ESIntegTestCase;
 import org.elasticsearch.test.VersionUtils;
-import org.elasticsearch.test.rest.client.http.HttpResponse;
 import org.hamcrest.CoreMatchers;
 import org.hamcrest.Matcher;
 import org.hamcrest.Matchers;
@@ -77,12 +77,12 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Set;
 
+import static java.util.Collections.emptyList;
 import static org.apache.lucene.util.LuceneTestCase.random;
 import static org.elasticsearch.test.VersionUtils.randomVersion;
 import static org.hamcrest.CoreMatchers.equalTo;
 import static org.hamcrest.CoreMatchers.is;
 import static org.hamcrest.MatcherAssert.assertThat;
-import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.greaterThan;
 import static org.hamcrest.Matchers.greaterThanOrEqualTo;
 import static org.hamcrest.Matchers.hasItem;
@@ -90,7 +90,6 @@ import static org.hamcrest.Matchers.hasKey;
 import static org.hamcrest.Matchers.instanceOf;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.notNullValue;
-import static org.hamcrest.Matchers.nullValue;
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -98,9 +97,6 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
-/**
- *
- */
 public class ElasticsearchAssertions {
 
     public static void assertAcked(AcknowledgedRequestBuilder<?, ?, ?> builder) {
@@ -127,6 +123,17 @@ public class ElasticsearchAssertions {
     public static void assertAcked(DeleteIndexResponse response) {
         assertThat("Delete Index failed - not acked", response.isAcknowledged(), equalTo(true));
         assertVersionSerializable(response);
+    }
+
+    /**
+     * Assert that an index creation was fully acknowledged, meaning that both the index creation cluster
+     * state update was successful and that the requisite number of shard copies were started before returning.
+     */
+    public static void assertAcked(CreateIndexResponse response) {
+        assertThat(response.getClass().getSimpleName() + " failed - not acked", response.isAcknowledged(), equalTo(true));
+        assertVersionSerializable(response);
+        assertTrue(response.getClass().getSimpleName() + " failed - index creation acked but not all shards were started",
+            response.isShardsAcked());
     }
 
     /**
@@ -488,10 +495,6 @@ public class ElasticsearchAssertions {
         return new ElasticsearchMatchers.SearchHitHasScoreMatcher(score);
     }
 
-    public static Matcher<HttpResponse> hasStatus(RestStatus restStatus) {
-        return new ElasticsearchMatchers.HttpResponseHasStatusMatcher(restStatus);
-    }
-
     public static <T extends Query> T assertBooleanSubQuery(Query query, Class<T> subqueryType, int i) {
         assertThat(query, instanceOf(BooleanQuery.class));
         BooleanQuery q = (BooleanQuery) query;
@@ -562,7 +565,6 @@ public class ElasticsearchAssertions {
             extraInfo += " with status [" + status + "]";
         }
 
-
         try {
             future.actionGet();
             fail = true;
@@ -572,7 +574,7 @@ public class ElasticsearchAssertions {
             if (status != null) {
                 assertThat(extraInfo, ExceptionsHelper.status(esException), equalTo(status));
             }
-        } catch (Throwable e) {
+        } catch (Exception e) {
             assertThat(extraInfo, e, instanceOf(exceptionClass));
             if (status != null) {
                 assertThat(extraInfo, ExceptionsHelper.status(e), equalTo(status));
@@ -604,7 +606,7 @@ public class ElasticsearchAssertions {
         try {
             future.actionGet();
             fail = true;
-        } catch (Throwable e) {
+        } catch (Exception e) {
             assertThat(extraInfo, ExceptionsHelper.status(e), equalTo(status));
         }
         // has to be outside catch clause to get a proper message
@@ -634,11 +636,11 @@ public class ElasticsearchAssertions {
          * a way that sucks less.
          */
         NamedWriteableRegistry registry;
-        if (ESIntegTestCase.isInternalCluster()) {
+        if (ESIntegTestCase.isInternalCluster() && ESIntegTestCase.internalCluster().size() > 0) {
             registry = ESIntegTestCase.internalCluster().getInstance(NamedWriteableRegistry.class);
         } else {
-            registry = new NamedWriteableRegistry();
-            new SearchModule(Settings.EMPTY, registry);
+            SearchModule searchModule = new SearchModule(Settings.EMPTY, false, emptyList());
+            registry = new NamedWriteableRegistry(searchModule.getNamedWriteables());
         }
         assertVersionSerializable(version, streamable, registry);
     }
@@ -651,10 +653,16 @@ public class ElasticsearchAssertions {
                 // streamable that comes in.
             }
             if (streamable instanceof ActionRequest) {
-                ((ActionRequest<?>) streamable).validate();
+                ((ActionRequest) streamable).validate();
             }
-            BytesReference orig = serialize(version, streamable);
-            StreamInput input = StreamInput.wrap(orig);
+            BytesReference orig;
+            try {
+                orig = serialize(version, streamable);
+            } catch (IllegalArgumentException e) {
+                // Can't serialize with this version so skip this test.
+                return;
+            }
+            StreamInput input = orig.streamInput();
             if (namedWriteableRegistry != null) {
                 input = new NamedWriteableAwareStreamInput(input, namedWriteableRegistry);
             }
@@ -662,37 +670,48 @@ public class ElasticsearchAssertions {
             newInstance.readFrom(input);
             assertThat("Stream should be fully read with version [" + version + "] for streamable [" + streamable + "]", input.available(),
                     equalTo(0));
-            assertThat("Serialization failed with version [" + version + "] bytes should be equal for streamable [" + streamable + "]",
-                    serialize(version, streamable), equalTo(orig));
-        } catch (Throwable ex) {
+            BytesReference newBytes = serialize(version, streamable);
+            if (false == orig.equals(newBytes)) {
+                // The bytes are different. That is a failure. Lets try to throw a useful exception for debugging.
+                String message = "Serialization failed with version [" + version + "] bytes should be equal for streamable [" + streamable
+                        + "]";
+                // If the bytes are different then comparing BytesRef's toStrings will show you *where* they are different
+                assertEquals(message, orig.toBytesRef().toString(), newBytes.toBytesRef().toString());
+                // They bytes aren't different. Very very weird.
+                fail(message);
+            }
+        } catch (Exception ex) {
             throw new RuntimeException("failed to check serialization - version [" + version + "] for streamable [" + streamable + "]", ex);
         }
 
     }
 
-    public static void assertVersionSerializable(Version version, final Throwable t) {
-        ElasticsearchAssertions.assertVersionSerializable(version, new ThrowableWrapper(t));
+    public static void assertVersionSerializable(Version version, final Exception e) {
+        ElasticsearchAssertions.assertVersionSerializable(version, new ExceptionWrapper(e));
     }
 
-    public static final class ThrowableWrapper implements Streamable {
-        Throwable throwable;
-        public ThrowableWrapper(Throwable t) {
-            throwable = t;
+    public static final class ExceptionWrapper implements Streamable {
+
+        private Exception exception;
+
+        public ExceptionWrapper(Exception e) {
+            exception = e;
         }
 
-        public ThrowableWrapper() {
-            throwable = null;
+        public ExceptionWrapper() {
+            exception = null;
         }
 
         @Override
         public void readFrom(StreamInput in) throws IOException {
-            throwable = in.readThrowable();
+            exception = in.readException();
         }
 
         @Override
         public void writeTo(StreamOutput out) throws IOException {
-            out.writeThrowable(throwable);
+            out.writeException(exception);
         }
+
     }
 
 
@@ -704,7 +723,7 @@ public class ElasticsearchAssertions {
             assertThat(constructor, Matchers.notNullValue());
             Streamable newInstance = constructor.newInstance();
             return newInstance;
-        } catch (Throwable e) {
+        } catch (Exception e) {
             return null;
         }
     }

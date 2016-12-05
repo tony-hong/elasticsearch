@@ -20,43 +20,64 @@
 package org.elasticsearch.painless.node;
 
 import org.elasticsearch.painless.Definition;
-import org.elasticsearch.painless.Variables;
+import org.elasticsearch.painless.Globals;
+import org.elasticsearch.painless.Location;
+import org.elasticsearch.painless.Locals;
 import org.elasticsearch.painless.MethodWriter;
 
+import java.util.Objects;
+import java.util.Set;
+
 /**
- * Respresents a decimal constant.
+ * Represents a decimal constant.
  */
 public final class EDecimal extends AExpression {
 
-    final String value;
+    private final String value;
 
-    public EDecimal(int line, int offset, String location, String value) {
-        super(line, offset, location);
+    public EDecimal(Location location, String value) {
+        super(location);
 
-        this.value = value;
+        this.value = Objects.requireNonNull(value);
     }
 
     @Override
-    void analyze(Variables variables) {
+    void extractVariables(Set<String> variables) {}
+
+    @Override
+    void analyze(Locals locals) {
+        if (!read) {
+            throw createError(new IllegalArgumentException("Must read from constant [" + value + "]."));
+        }
+
         if (value.endsWith("f") || value.endsWith("F")) {
             try {
                 constant = Float.parseFloat(value.substring(0, value.length() - 1));
                 actual = Definition.FLOAT_TYPE;
             } catch (NumberFormatException exception) {
-                throw new IllegalArgumentException(error("Invalid float constant [" + value + "]."));
+                throw createError(new IllegalArgumentException("Invalid float constant [" + value + "]."));
             }
         } else {
+            String toParse = value;
+            if (toParse.endsWith("d") || value.endsWith("D")) {
+                toParse = toParse.substring(0, value.length() - 1);
+            }
             try {
-                constant = Double.parseDouble(value);
+                constant = Double.parseDouble(toParse);
                 actual = Definition.DOUBLE_TYPE;
             } catch (NumberFormatException exception) {
-                throw new IllegalArgumentException(error("Invalid double constant [" + value + "]."));
+                throw createError(new IllegalArgumentException("Invalid double constant [" + value + "]."));
             }
         }
     }
 
     @Override
-    void write(MethodWriter writer) {
-        throw new IllegalArgumentException(error("Illegal tree structure."));
+    void write(MethodWriter writer, Globals globals) {
+        throw createError(new IllegalStateException("Illegal tree structure."));
+    }
+
+    @Override
+    public String toString() {
+        return singleLineToString(value);
     }
 }

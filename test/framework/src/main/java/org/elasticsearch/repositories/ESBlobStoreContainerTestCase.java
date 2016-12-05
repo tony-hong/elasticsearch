@@ -49,7 +49,7 @@ public abstract class ESBlobStoreContainerTestCase extends ESTestCase {
         try(final BlobStore store = newBlobStore()) {
             final BlobContainer container = store.blobContainer(new BlobPath());
             byte[] data = randomBytes(randomIntBetween(10, scaledRandomIntBetween(1024, 1 << 16)));
-            container.writeBlob("foobar", new BytesArray(data));
+            writeBlob(container, "foobar", new BytesArray(data));
             try (InputStream stream = container.readBlob("foobar")) {
                 BytesRefBuilder target = new BytesRefBuilder();
                 while (target.length() < data.length) {
@@ -109,6 +109,42 @@ public abstract class ESBlobStoreContainerTestCase extends ESTestCase {
             assertThat(blobs.size(), equalTo(1));
             assertThat(blobs.get(newName).length(), equalTo(generatedBlobs.get(name)));
             assertThat(data, equalTo(readBlobFully(container, newName, length)));
+        }
+    }
+
+    public void testDeleteBlob() throws IOException {
+        try (final BlobStore store = newBlobStore()) {
+            final String blobName = "foobar";
+            final BlobContainer container = store.blobContainer(new BlobPath());
+            expectThrows(IOException.class, () -> container.deleteBlob(blobName));
+
+            byte[] data = randomBytes(randomIntBetween(10, scaledRandomIntBetween(1024, 1 << 16)));
+            final BytesArray bytesArray = new BytesArray(data);
+            writeBlob(container, blobName, bytesArray);
+            container.deleteBlob(blobName); // should not raise
+
+            // blob deleted, so should raise again
+            expectThrows(IOException.class, () -> container.deleteBlob(blobName));
+        }
+    }
+
+    public void testVerifyOverwriteFails() throws IOException {
+        try (final BlobStore store = newBlobStore()) {
+            final String blobName = "foobar";
+            final BlobContainer container = store.blobContainer(new BlobPath());
+            byte[] data = randomBytes(randomIntBetween(10, scaledRandomIntBetween(1024, 1 << 16)));
+            final BytesArray bytesArray = new BytesArray(data);
+            writeBlob(container, blobName, bytesArray);
+            // should not be able to overwrite existing blob
+            expectThrows(IOException.class, () -> writeBlob(container, blobName, bytesArray));
+            container.deleteBlob(blobName);
+            writeBlob(container, blobName, bytesArray); // after deleting the previous blob, we should be able to write to it again
+        }
+    }
+
+    private void writeBlob(final BlobContainer container, final String blobName, final BytesArray bytesArray) throws IOException {
+        try (InputStream stream = bytesArray.streamInput()) {
+            container.writeBlob(blobName, stream, bytesArray.length());
         }
     }
 

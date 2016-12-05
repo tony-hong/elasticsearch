@@ -19,8 +19,8 @@
 
 package org.elasticsearch.painless;
 
-import java.util.Arrays;
-import java.util.Collections;
+import java.util.HashMap;
+import java.util.Map;
 
 public class BasicAPITests extends ScriptTestCase {
 
@@ -53,6 +53,21 @@ public class BasicAPITests extends ScriptTestCase {
     public void testMapLoadStore() {
         assertEquals(5, exec("def x = new HashMap(); x.abc = 5; return x.abc;"));
         assertEquals(5, exec("def x = new HashMap(); x['abc'] = 5; return x['abc'];"));
+    }
+
+    /** Test loads and stores with update script equivalent */
+    public void testUpdateMapLoadStore() {
+        Map<String, Object> load = new HashMap<>();
+        Map<String, Object> _source = new HashMap<>();
+        Map<String, Object> ctx = new HashMap<>();
+        Map<String, Object> params = new HashMap<>();
+
+        load.put("load5", "testvalue");
+        _source.put("load", load);
+        ctx.put("_source", _source);
+        params.put("ctx", ctx);
+
+        assertEquals("testvalue", exec("ctx._source['load'].5 = ctx._source['load'].remove('load5')", params, true));
     }
 
     /** Test loads and stores with a list */
@@ -93,8 +108,20 @@ public class BasicAPITests extends ScriptTestCase {
         assertBytecodeExists("def x = 1F", "INVOKESTATIC java/lang/Float.valueOf (F)Ljava/lang/Float;");
         assertBytecodeExists("def x = 1D", "INVOKESTATIC java/lang/Double.valueOf (D)Ljava/lang/Double;");
     }
-    
-    void testStream() {
-        assertEquals(11, exec("params.list.stream().sum()", Collections.singletonMap("list", Arrays.asList(1,2,3,5))));
+
+    public void testInterfaceDefaultMethods() {
+        assertEquals(1, exec("Map map = new HashMap(); return map.getOrDefault(5,1);"));
+        assertEquals(1, exec("def map = new HashMap(); return map.getOrDefault(5,1);"));
+    }
+
+    public void testInterfacesHaveObject() {
+        assertEquals("{}", exec("Map map = new HashMap(); return map.toString();"));
+        assertEquals("{}", exec("def map = new HashMap(); return map.toString();"));
+    }
+
+    public void testPrimitivesHaveMethods() {
+        assertEquals(5, exec("int x = 5; return x.intValue();"));
+        assertEquals("5", exec("int x = 5; return x.toString();"));
+        assertEquals(0, exec("int x = 5; return x.compareTo(5);"));
     }
 }

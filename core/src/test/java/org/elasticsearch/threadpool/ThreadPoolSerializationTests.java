@@ -40,11 +40,8 @@ import static org.hamcrest.Matchers.hasKey;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.nullValue;
 
-/**
- *
- */
 public class ThreadPoolSerializationTests extends ESTestCase {
-    BytesStreamOutput output = new BytesStreamOutput();
+    private final BytesStreamOutput output = new BytesStreamOutput();
     private ThreadPool.ThreadPoolType threadPoolType;
 
     @Before
@@ -54,13 +51,13 @@ public class ThreadPoolSerializationTests extends ESTestCase {
     }
 
     public void testThatQueueSizeSerializationWorks() throws Exception {
-        ThreadPool.Info info = new ThreadPool.Info("foo", threadPoolType, 1, 10, TimeValue.timeValueMillis(3000), SizeValue.parseSizeValue("10k"));
+        ThreadPool.Info info = new ThreadPool.Info("foo", threadPoolType, 1, 10,
+                TimeValue.timeValueMillis(3000), SizeValue.parseSizeValue("10k"));
         output.setVersion(Version.CURRENT);
         info.writeTo(output);
 
-        StreamInput input = StreamInput.wrap(output.bytes());
-        ThreadPool.Info newInfo = new ThreadPool.Info();
-        newInfo.readFrom(input);
+        StreamInput input = output.bytes().streamInput();
+        ThreadPool.Info newInfo = new ThreadPool.Info(input);
 
         assertThat(newInfo.getQueueSize().singles(), is(10000L));
     }
@@ -70,9 +67,8 @@ public class ThreadPoolSerializationTests extends ESTestCase {
         output.setVersion(Version.CURRENT);
         info.writeTo(output);
 
-        StreamInput input = StreamInput.wrap(output.bytes());
-        ThreadPool.Info newInfo = new ThreadPool.Info();
-        newInfo.readFrom(input);
+        StreamInput input = output.bytes().streamInput();
+        ThreadPool.Info newInfo = new ThreadPool.Info(input);
 
         assertThat(newInfo.getQueueSize(), is(nullValue()));
     }
@@ -96,14 +92,15 @@ public class ThreadPoolSerializationTests extends ESTestCase {
     }
 
     public void testThatNegativeSettingAllowsToStart() throws InterruptedException {
-        Settings settings = Settings.builder().put("node.name", "index").put("threadpool.index.queue_size", "-1").build();
+        Settings settings = Settings.builder().put("node.name", "index").put("thread_pool.index.queue_size", "-1").build();
         ThreadPool threadPool = new ThreadPool(settings);
         assertThat(threadPool.info("index").getQueueSize(), is(nullValue()));
         terminate(threadPool);
     }
 
     public void testThatToXContentWritesInteger() throws Exception {
-        ThreadPool.Info info = new ThreadPool.Info("foo", threadPoolType, 1, 10, TimeValue.timeValueMillis(3000), SizeValue.parseSizeValue("1k"));
+        ThreadPool.Info info = new ThreadPool.Info("foo", threadPoolType, 1, 10,
+                TimeValue.timeValueMillis(3000), SizeValue.parseSizeValue("1k"));
         XContentBuilder builder = jsonBuilder();
         builder.startObject();
         info.toXContent(builder, ToXContent.EMPTY_PARAMS);
@@ -125,9 +122,8 @@ public class ThreadPoolSerializationTests extends ESTestCase {
         output.setVersion(Version.CURRENT);
         info.writeTo(output);
 
-        StreamInput input = StreamInput.wrap(output.bytes());
-        ThreadPool.Info newInfo = new ThreadPool.Info();
-        newInfo.readFrom(input);
+        StreamInput input = output.bytes().streamInput();
+        ThreadPool.Info newInfo = new ThreadPool.Info(input);
 
         assertThat(newInfo.getThreadPoolType(), is(threadPoolType));
     }

@@ -24,10 +24,13 @@ import org.apache.lucene.search.BooleanQuery;
 import org.apache.lucene.search.ConstantScoreQuery;
 import org.apache.lucene.search.MatchAllDocsQuery;
 import org.apache.lucene.search.Query;
+import org.elasticsearch.common.ParseFieldMatcher;
+import org.elasticsearch.common.ParsingException;
 import org.elasticsearch.common.bytes.BytesReference;
 import org.elasticsearch.common.xcontent.XContentBuilder;
 import org.elasticsearch.common.xcontent.XContentFactory;
 import org.elasticsearch.common.xcontent.XContentType;
+import org.elasticsearch.search.internal.SearchContext;
 import org.elasticsearch.test.AbstractQueryTestCase;
 import org.hamcrest.Matchers;
 
@@ -43,6 +46,7 @@ import static org.elasticsearch.index.query.QueryBuilders.constantScoreQuery;
 import static org.elasticsearch.index.query.QueryBuilders.termQuery;
 import static org.hamcrest.CoreMatchers.equalTo;
 import static org.hamcrest.CoreMatchers.instanceOf;
+import static org.hamcrest.CoreMatchers.startsWith;
 
 public class BoolQueryBuilderTests extends AbstractQueryTestCase<BoolQueryBuilder> {
     @Override
@@ -77,10 +81,11 @@ public class BoolQueryBuilderTests extends AbstractQueryTestCase<BoolQueryBuilde
     }
 
     @Override
-    protected void doAssertLuceneQuery(BoolQueryBuilder queryBuilder, Query query, QueryShardContext context) throws IOException {
+    protected void doAssertLuceneQuery(BoolQueryBuilder queryBuilder, Query query, SearchContext searchContext) throws IOException {
         if (!queryBuilder.hasClauses()) {
             assertThat(query, instanceOf(MatchAllDocsQuery.class));
         } else {
+            QueryShardContext context = searchContext.getQueryShardContext();
             List<BooleanClause> clauses = new ArrayList<>();
             clauses.addAll(getBooleanClauses(queryBuilder.must(), BooleanClause.Occur.MUST, context));
             clauses.addAll(getBooleanClauses(queryBuilder.mustNot(), BooleanClause.Occur.MUST_NOT, context));
@@ -160,30 +165,10 @@ public class BoolQueryBuilderTests extends AbstractQueryTestCase<BoolQueryBuilde
 
     public void testIllegalArguments() {
         BoolQueryBuilder booleanQuery = new BoolQueryBuilder();
-
-        try {
-            booleanQuery.must(null);
-            fail("cannot be null");
-        } catch (IllegalArgumentException e) {
-        }
-
-        try {
-            booleanQuery.mustNot(null);
-            fail("cannot be null");
-        } catch (IllegalArgumentException e) {
-        }
-
-        try {
-            booleanQuery.filter(null);
-            fail("cannot be null");
-        } catch (IllegalArgumentException e) {
-        }
-
-        try {
-            booleanQuery.should(null);
-            fail("cannot be null");
-        } catch (IllegalArgumentException e) {
-        }
+        expectThrows(IllegalArgumentException.class, () -> booleanQuery.must(null));
+        expectThrows(IllegalArgumentException.class, () -> booleanQuery.mustNot(null));
+        expectThrows(IllegalArgumentException.class, () -> booleanQuery.filter(null));
+        expectThrows(IllegalArgumentException.class, () -> booleanQuery.should(null));
     }
 
     // https://github.com/elastic/elasticsearch/issues/7240
@@ -343,6 +328,66 @@ public class BoolQueryBuilderTests extends AbstractQueryTestCase<BoolQueryBuilde
         assertEquals(query, 42, queryBuilder.boost, 0.00001);
         assertEquals(query, "23", queryBuilder.minimumShouldMatch());
         assertEquals(query, "kimchy", ((TermQueryBuilder)queryBuilder.must().get(0)).value());
+    }
+
+    /**
+     * we ignore empty query bodies if we are not in strict mode
+     */
+    public void testFromJsonEmptyQueryBody() throws IOException {
+        String query =
+                "{" +
+                "\"bool\" : {" +
+                "  \"must\" : [ { } ]," +
+                "  \"filter\" : { }," +
+                "  \"must_not\" : [ { \"constant_score\" : {\"filter\" : { } } } ]" +
+                "}" +
+              "}";
+
+        BoolQueryBuilder queryBuilder = (BoolQueryBuilder) parseQuery(query, ParseFieldMatcher.EMPTY);
+        assertEquals(query, 0, queryBuilder.must().size());
+        assertEquals(query, 0, queryBuilder.filter().size());
+        assertEquals(query, 0, queryBuilder.mustNot().size());
+        assertEquals(query, 0, queryBuilder.should().size());
+        // we should have deprecation warning headers regardless of throwing an exception
+        checkWarningHeaders("query malformed, empty clause found at [1:27]",
+                "query malformed, empty clause found at [1:46]",
+                "query malformed, empty clause found at [1:100]");
+
+        IllegalArgumentException ex = expectThrows(IllegalArgumentException.class, () -> parseQuery(query, ParseFieldMatcher.STRICT));
+        assertThat(ex.getMessage(), startsWith("query malformed, empty clause found at"));
+        checkWarningHeaders("query malformed, empty clause found at [1:27]");
+    }
+
+    /**
+     * test that unknown query names in the clauses throw an error
+     */
+    public void testUnknownQueryName() throws IOException {
+        String query = "{\"bool\" : {\"must\" : { \"unknown_query\" : { } } } }";
+
+        ParsingException ex = expectThrows(ParsingException.class, () -> parseQuery(query, ParseFieldMatcher.EMPTY));
+        assertEquals("no [query] registered for [unknown_query]", ex.getMessage());
+    }
+
+    /**
+     * test that two queries in object throws error
+     */
+    public void testTooManyQueriesInObject() throws IOException {
+        String clauseType = randomFrom("must", "should", "must_not", "filter");
+        // should also throw error if invalid query is preceded by a valid one
+        String query = "{\n" +
+                "  \"bool\": {\n" +
+                "    \"" + clauseType + "\": {\n" +
+                "      \"match\": {\n" +
+                "        \"foo\": \"bar\"\n" +
+                "      },\n" +
+                "      \"match\": {\n" +
+                "        \"baz\": \"buzz\"\n" +
+                "      }\n" +
+                "    }\n" +
+                "  }\n" +
+                "}";
+        ParsingException ex = expectThrows(ParsingException.class, () -> parseQuery(query, ParseFieldMatcher.EMPTY));
+        assertEquals("[match] malformed query, expected [END_OBJECT] but found [FIELD_NAME]", ex.getMessage());
     }
 
     public void testRewrite() throws IOException {

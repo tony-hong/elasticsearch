@@ -20,24 +20,34 @@
 package org.elasticsearch.painless.node;
 
 import org.elasticsearch.painless.Definition;
+import org.elasticsearch.painless.Globals;
 import org.elasticsearch.painless.Definition.Sort;
-import org.elasticsearch.painless.Variables;
+
+import java.util.Set;
+
+import org.elasticsearch.painless.Location;
+import org.elasticsearch.painless.Locals;
 import org.elasticsearch.painless.MethodWriter;
 
 /**
- * Respresents a constant.  Note this replaces any other expression
- * node with a constant value set during a cast.  (Internal only.)
+ * Represents a constant inserted into the tree replacing
+ * other constants during constant folding.  (Internal only.)
  */
 final class EConstant extends AExpression {
 
-    EConstant(int line, int offset, String location, Object constant) {
-        super(line, offset, location);
+    EConstant(Location location, Object constant) {
+        super(location);
 
         this.constant = constant;
     }
 
     @Override
-    void analyze(Variables variables) {
+    void extractVariables(Set<String> variables) {
+        throw new IllegalStateException("Illegal tree structure.");
+    }
+
+    @Override
+    void analyze(Locals locals) {
         if (constant instanceof String) {
             actual = Definition.STRING_TYPE;
         } else if (constant instanceof Double) {
@@ -57,12 +67,12 @@ final class EConstant extends AExpression {
         } else if (constant instanceof Boolean) {
             actual = Definition.BOOLEAN_TYPE;
         } else {
-            throw new IllegalStateException(error("Illegal tree structure."));
+            throw createError(new IllegalStateException("Illegal tree structure."));
         }
     }
 
     @Override
-    void write(MethodWriter writer) {
+    void write(MethodWriter writer, Globals globals) {
         Sort sort = actual.sort;
 
         switch (sort) {
@@ -74,22 +84,18 @@ final class EConstant extends AExpression {
             case CHAR:   writer.push((char)constant);    break;
             case SHORT:  writer.push((short)constant);   break;
             case BYTE:   writer.push((byte)constant);    break;
-            case BOOL:
-                if (tru != null && (boolean)constant) {
-                    writer.goTo(tru);
-                } else if (fals != null && !(boolean)constant) {
-                    writer.goTo(fals);
-                } else if (tru == null && fals == null) {
-                    writer.push((boolean)constant);
-                }
-
-                break;
+            case BOOL:   writer.push((boolean)constant); break;
             default:
-                throw new IllegalStateException(error("Illegal tree structure."));
+                throw createError(new IllegalStateException("Illegal tree structure."));
         }
+    }
 
-        if (sort != Sort.BOOL) {
-            writer.writeBranch(tru, fals);
+    @Override
+    public String toString() {
+        String c = constant.toString();
+        if (constant instanceof String) {
+            c = "'" + c + "'";
         }
+        return singleLineToString(constant.getClass().getSimpleName(), c);
     }
 }

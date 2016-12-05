@@ -29,8 +29,6 @@ import org.elasticsearch.index.snapshots.IndexShardSnapshotStatus;
 
 import java.io.IOException;
 
-/**
- */
 public class SnapshotIndexShardStatus extends BroadcastShardResponse implements ToXContent {
 
     private SnapshotIndexShardStage stage = SnapshotIndexShardStage.INIT;
@@ -141,7 +139,7 @@ public class SnapshotIndexShardStatus extends BroadcastShardResponse implements 
 
     @Override
     public XContentBuilder toXContent(XContentBuilder builder, Params params) throws IOException {
-        builder.startObject(Integer.toString(getShardId()));
+        builder.startObject(Integer.toString(getShardId().getId()));
         builder.field(Fields.STAGE, getStage());
         stats.toXContent(builder, params);
         if (getNodeId() != null) {

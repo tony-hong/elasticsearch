@@ -37,19 +37,23 @@ import org.elasticsearch.common.io.stream.NamedWriteableRegistry;
 import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.io.stream.StreamOutput;
 import org.elasticsearch.common.lease.Releasable;
+import org.elasticsearch.common.network.NetworkService;
 import org.elasticsearch.common.settings.Settings;
+import org.elasticsearch.common.util.BigArrays;
 import org.elasticsearch.indices.breaker.NoneCircuitBreakerService;
 import org.elasticsearch.tasks.TaskManager;
 import org.elasticsearch.test.ESTestCase;
 import org.elasticsearch.test.tasks.MockTaskManager;
+import org.elasticsearch.threadpool.TestThreadPool;
 import org.elasticsearch.threadpool.ThreadPool;
+import org.elasticsearch.transport.MockTcpTransport;
 import org.elasticsearch.transport.TransportService;
-import org.elasticsearch.transport.local.LocalTransport;
 import org.junit.After;
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
 
 import java.io.IOException;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
@@ -66,13 +70,13 @@ import static org.elasticsearch.test.ClusterServiceUtils.setState;
 public abstract class TaskManagerTestCase extends ESTestCase {
 
     protected static ThreadPool threadPool;
-    public static final ClusterName CLUSTER_NAME = new ClusterName("test-cluster");
+    public static final Settings CLUSTER_SETTINGS = Settings.builder().put("cluster.name", "test-cluster").build();
     protected TestNode[] testNodes;
     protected int nodesCount;
 
     @BeforeClass
     public static void beforeClass() {
-        threadPool = new ThreadPool(TransportTasksActionTests.class.getSimpleName());
+        threadPool = new TestThreadPool(TransportTasksActionTests.class.getSimpleName());
     }
 
     @AfterClass
@@ -135,17 +139,17 @@ public abstract class TaskManagerTestCase extends ESTestCase {
     abstract class AbstractTestNodesAction<NodesRequest extends BaseNodesRequest<NodesRequest>, NodeRequest extends BaseNodeRequest>
             extends TransportNodesAction<NodesRequest, NodesResponse, NodeRequest, NodeResponse> {
 
-        AbstractTestNodesAction(Settings settings, String actionName, ClusterName clusterName, ThreadPool threadPool,
+        AbstractTestNodesAction(Settings settings, String actionName, ThreadPool threadPool,
                                 ClusterService clusterService, TransportService transportService, Supplier<NodesRequest> request,
                                 Supplier<NodeRequest> nodeRequest) {
-            super(settings, actionName, clusterName, threadPool, clusterService, transportService,
+            super(settings, actionName, threadPool, clusterService, transportService,
                     new ActionFilters(new HashSet<>()), new IndexNameExpressionResolver(Settings.EMPTY),
                     request, nodeRequest, ThreadPool.Names.GENERIC, NodeResponse.class);
         }
 
         @Override
         protected NodesResponse newResponse(NodesRequest request, List<NodeResponse> responses, List<FailedNodeException> failures) {
-            return new NodesResponse(clusterName, responses, failures);
+            return new NodesResponse(clusterService.getClusterName(), responses, failures);
         }
 
         @Override
@@ -165,10 +169,10 @@ public abstract class TaskManagerTestCase extends ESTestCase {
     public static class TestNode implements Releasable {
         public TestNode(String name, ThreadPool threadPool, Settings settings) {
             clusterService = createClusterService(threadPool);
-            ClusterName clusterName = clusterService.state().getClusterName();
             transportService = new TransportService(settings,
-                    new LocalTransport(settings, threadPool, Version.CURRENT, new NamedWriteableRegistry(),
-                        new NoneCircuitBreakerService()), threadPool, clusterName) {
+                    new MockTcpTransport(settings, threadPool, BigArrays.NON_RECYCLING_INSTANCE, new NoneCircuitBreakerService(),
+                            new NamedWriteableRegistry(Collections.emptyList()), new NetworkService(settings, Collections.emptyList())),
+                    threadPool, TransportService.NOOP_TRANSPORT_INTERCEPTOR, null) {
                 @Override
                 protected TaskManager createTaskManager() {
                     if (MockTaskManager.USE_MOCK_TASK_MANAGER_SETTING.get(settings)) {
@@ -184,9 +188,9 @@ public abstract class TaskManagerTestCase extends ESTestCase {
                     emptyMap(), emptySet(), Version.CURRENT);
             IndexNameExpressionResolver indexNameExpressionResolver = new IndexNameExpressionResolver(settings);
             ActionFilters actionFilters = new ActionFilters(emptySet());
-            transportListTasksAction = new TransportListTasksAction(settings, CLUSTER_NAME, threadPool, clusterService, transportService,
+            transportListTasksAction = new TransportListTasksAction(settings, threadPool, clusterService, transportService,
                     actionFilters, indexNameExpressionResolver);
-            transportCancelTasksAction = new TransportCancelTasksAction(settings, CLUSTER_NAME, threadPool, clusterService,
+            transportCancelTasksAction = new TransportCancelTasksAction(settings, threadPool, clusterService,
                     transportService, actionFilters, indexNameExpressionResolver);
             transportService.acceptIncomingRequests();
         }
@@ -227,10 +231,9 @@ public abstract class TaskManagerTestCase extends ESTestCase {
     public static RecordingTaskManagerListener[] setupListeners(TestNode[] nodes, String... actionMasks) {
         RecordingTaskManagerListener[] listeners = new RecordingTaskManagerListener[nodes.length];
         for (int i = 0; i < nodes.length; i++) {
-            listeners[i] = new RecordingTaskManagerListener(nodes[i].discoveryNode, actionMasks);
+            listeners[i] = new RecordingTaskManagerListener(nodes[i].discoveryNode.getId(), actionMasks);
             ((MockTaskManager) (nodes[i].transportService.getTaskManager())).addListener(listeners[i]);
         }
         return listeners;
     }
-
 }

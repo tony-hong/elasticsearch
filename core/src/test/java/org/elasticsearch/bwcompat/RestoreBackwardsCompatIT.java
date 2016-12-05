@@ -1,5 +1,4 @@
 /*
-/*
  * Licensed to Elasticsearch under one or more contributor
  * license agreements. See the NOTICE file distributed with
  * this work for additional information regarding copyright
@@ -40,13 +39,13 @@ import org.elasticsearch.test.ESIntegTestCase.Scope;
 import org.elasticsearch.test.VersionUtils;
 
 import java.io.IOException;
-import java.lang.reflect.Modifier;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
 import java.util.SortedSet;
@@ -95,10 +94,10 @@ public class RestoreBackwardsCompatIT extends AbstractSnapshotIntegTestCase {
         }
 
         SortedSet<String> expectedVersions = new TreeSet<>();
-        for (Version v : VersionUtils.allVersions()) {
+        for (Version v : VersionUtils.allReleasedVersions()) {
             if (VersionUtils.isSnapshot(v)) continue;  // snapshots are unreleased, so there is no backcompat yet
-            if (v.isAlpha()) continue; // no guarantees for alpha releases
-            if (v.onOrBefore(Version.V_2_0_0_beta1)) continue; // we can only test back one major lucene version
+            if (v.isRelease() == false) continue; // no guarantees for prereleases
+            if (v.before(Version.CURRENT.minimumIndexCompatibilityVersion())) continue; // we only support versions N and N-1
             if (v.equals(Version.CURRENT)) continue; // the current version is always compatible with itself
             expectedVersions.add(v.toString());
         }
@@ -187,7 +186,7 @@ public class RestoreBackwardsCompatIT extends AbstractSnapshotIntegTestCase {
         logger.info("--> check templates");
         IndexTemplateMetaData template = clusterState.getMetaData().templates().get("template_" + version.toLowerCase(Locale.ROOT));
         assertThat(template, notNullValue());
-        assertThat(template.template(), equalTo("te*"));
+        assertThat(template.patterns(), equalTo(Collections.singletonList("te*")));
         assertThat(template.settings().getAsInt(IndexMetaData.SETTING_NUMBER_OF_SHARDS, -1), equalTo(1));
         assertThat(template.mappings().size(), equalTo(1));
         assertThat(template.mappings().get("type1").string(), equalTo("{\"type1\":{\"_source\":{\"enabled\":false}}}"));
@@ -207,7 +206,7 @@ public class RestoreBackwardsCompatIT extends AbstractSnapshotIntegTestCase {
         logger.info("--> restoring unsupported snapshot");
         try {
             client().admin().cluster().prepareRestoreSnapshot(repo, snapshot).setRestoreGlobalState(true).setWaitForCompletion(true).get();
-            fail("should have failed to restore");
+            fail("should have failed to restore - " + repo);
         } catch (SnapshotRestoreException ex) {
             assertThat(ex.getMessage(), containsString("cannot restore index"));
             assertThat(ex.getMessage(), containsString("because it cannot be upgraded"));

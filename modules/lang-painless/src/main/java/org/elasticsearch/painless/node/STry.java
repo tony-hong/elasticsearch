@@ -19,41 +19,54 @@
 
 package org.elasticsearch.painless.node;
 
-import org.elasticsearch.painless.Variables;
-import org.objectweb.asm.Label;
+import org.elasticsearch.painless.Globals;
+import org.elasticsearch.painless.Locals;
+import org.elasticsearch.painless.Location;
 import org.elasticsearch.painless.MethodWriter;
+import org.objectweb.asm.Label;
 
 import java.util.Collections;
 import java.util.List;
+import java.util.Set;
+
+import static java.util.Collections.singleton;
 
 /**
  * Represents the try block as part of a try-catch block.
  */
 public final class STry extends AStatement {
 
-    final SBlock block;
-    final List<SCatch> catches;
+    private final SBlock block;
+    private final List<SCatch> catches;
 
-    public STry(int line, int offset, String location, SBlock block, List<SCatch> traps) {
-        super(line, offset, location);
+    public STry(Location location, SBlock block, List<SCatch> catches) {
+        super(location);
 
         this.block = block;
-        this.catches = Collections.unmodifiableList(traps);
+        this.catches = Collections.unmodifiableList(catches);
     }
 
     @Override
-    void analyze(Variables variables) {
+    void extractVariables(Set<String> variables) {
+        if (block != null) {
+            block.extractVariables(variables);
+        }
+        for (SCatch expr : catches) {
+            expr.extractVariables(variables);
+        }
+    }
+
+    @Override
+    void analyze(Locals locals) {
         if (block == null) {
-            throw new IllegalArgumentException(error("Extraneous try statement."));
+            throw createError(new IllegalArgumentException("Extraneous try statement."));
         }
 
         block.lastSource = lastSource;
         block.inLoop = inLoop;
         block.lastLoop = lastLoop;
 
-        variables.incrementScope();
-        block.analyze(variables);
-        variables.decrementScope();
+        block.analyze(Locals.newLocalScope(locals));
 
         methodEscape = block.methodEscape;
         loopEscape = block.loopEscape;
@@ -68,9 +81,7 @@ public final class STry extends AStatement {
             catc.inLoop = inLoop;
             catc.lastLoop = lastLoop;
 
-            variables.incrementScope();
-            catc.analyze(variables);
-            variables.decrementScope();
+            catc.analyze(Locals.newLocalScope(locals));
 
             methodEscape &= catc.methodEscape;
             loopEscape &= catc.loopEscape;
@@ -85,8 +96,8 @@ public final class STry extends AStatement {
     }
 
     @Override
-    void write(MethodWriter writer) {
-        writeDebugInfo(writer);
+    void write(MethodWriter writer, Globals globals) {
+        writer.writeStatementOffset(location);
 
         Label begin = new Label();
         Label end = new Label();
@@ -96,7 +107,7 @@ public final class STry extends AStatement {
 
         block.continu = continu;
         block.brake = brake;
-        block.write(writer);
+        block.write(writer, globals);
 
         if (!block.allEscape) {
             writer.goTo(exception);
@@ -108,11 +119,16 @@ public final class STry extends AStatement {
             catc.begin = begin;
             catc.end = end;
             catc.exception = catches.size() > 1 ? exception : null;
-            catc.write(writer);
+            catc.write(writer, globals);
         }
 
         if (!block.allEscape || catches.size() > 1) {
             writer.mark(exception);
         }
+    }
+
+    @Override
+    public String toString() {
+        return multilineToString(singleton(block), catches);
     }
 }

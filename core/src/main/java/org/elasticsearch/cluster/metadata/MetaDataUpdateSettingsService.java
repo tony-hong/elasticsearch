@@ -19,6 +19,7 @@
 
 package org.elasticsearch.cluster.metadata;
 
+import org.elasticsearch.ExceptionsHelper;
 import org.elasticsearch.Version;
 import org.elasticsearch.action.ActionListener;
 import org.elasticsearch.action.admin.indices.settings.put.UpdateSettingsClusterStateUpdateRequest;
@@ -32,7 +33,6 @@ import org.elasticsearch.cluster.block.ClusterBlock;
 import org.elasticsearch.cluster.block.ClusterBlocks;
 import org.elasticsearch.cluster.routing.RoutingTable;
 import org.elasticsearch.cluster.routing.allocation.AllocationService;
-import org.elasticsearch.cluster.routing.allocation.RoutingAllocation;
 import org.elasticsearch.cluster.service.ClusterService;
 import org.elasticsearch.common.Priority;
 import org.elasticsearch.common.collect.Tuple;
@@ -43,7 +43,9 @@ import org.elasticsearch.common.settings.Setting;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.unit.TimeValue;
 import org.elasticsearch.index.Index;
+import org.elasticsearch.indices.IndicesService;
 
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -61,17 +63,18 @@ public class MetaDataUpdateSettingsService extends AbstractComponent implements 
 
     private final AllocationService allocationService;
 
-    private final IndexNameExpressionResolver indexNameExpressionResolver;
     private final IndexScopedSettings indexScopedSettings;
+    private final IndicesService indicesService;
 
     @Inject
-    public MetaDataUpdateSettingsService(Settings settings, ClusterService clusterService, AllocationService allocationService, IndexScopedSettings indexScopedSettings, IndexNameExpressionResolver indexNameExpressionResolver) {
+    public MetaDataUpdateSettingsService(Settings settings, ClusterService clusterService, AllocationService allocationService,
+                                         IndexScopedSettings indexScopedSettings, IndicesService indicesService) {
         super(settings);
         this.clusterService = clusterService;
-        this.indexNameExpressionResolver = indexNameExpressionResolver;
         this.clusterService.add(this);
         this.allocationService = allocationService;
         this.indexScopedSettings = indexScopedSettings;
+        this.indicesService = indicesService;
     }
 
     @Override
@@ -139,7 +142,7 @@ public class MetaDataUpdateSettingsService extends AbstractComponent implements 
                     }
 
                     @Override
-                    public void onFailure(Throwable t) {
+                    public void onFailure(Exception t) {
                         for (Index index : indices) {
                             logger.warn("{} fail to auto expand replicas to [{}]", index, fNumberOfReplicas);
                         }
@@ -221,6 +224,9 @@ public class MetaDataUpdateSettingsService extends AbstractComponent implements 
 
                 int updatedNumberOfReplicas = openSettings.getAsInt(IndexMetaData.SETTING_NUMBER_OF_REPLICAS, -1);
                 if (updatedNumberOfReplicas != -1 && preserveExisting == false) {
+                    // we do *not* update the in sync allocation ids as they will be removed upon the first index
+                    // operation which make these copies stale
+                    // TODO: update the list once the data is deleted by the node?
                     routingTableBuilder.updateNumberOfReplicas(updatedNumberOfReplicas, actualIndices);
                     metaDataBuilder.updateNumberOfReplicas(updatedNumberOfReplicas, actualIndices);
                     logger.info("updating number_of_replicas to [{}] for indices {}", updatedNumberOfReplicas, actualIndices);
@@ -264,13 +270,20 @@ public class MetaDataUpdateSettingsService extends AbstractComponent implements 
                 ClusterState updatedState = ClusterState.builder(currentState).metaData(metaDataBuilder).routingTable(routingTableBuilder.build()).blocks(blocks).build();
 
                 // now, reroute in case things change that require it (like number of replicas)
-                RoutingAllocation.Result routingResult = allocationService.reroute(updatedState, "settings update");
-                updatedState = ClusterState.builder(updatedState).routingResult(routingResult).build();
-                for (Index index : openIndices) {
-                    indexScopedSettings.dryRun(updatedState.metaData().getIndexSafe(index).getSettings());
-                }
-                for (Index index : closeIndices) {
-                    indexScopedSettings.dryRun(updatedState.metaData().getIndexSafe(index).getSettings());
+                updatedState = allocationService.reroute(updatedState, "settings update");
+                try {
+                    for (Index index : openIndices) {
+                        final IndexMetaData currentMetaData = currentState.getMetaData().getIndexSafe(index);
+                        final IndexMetaData updatedMetaData = updatedState.metaData().getIndexSafe(index);
+                        indicesService.verifyIndexMetadata(currentMetaData, updatedMetaData);
+                    }
+                    for (Index index : closeIndices) {
+                        final IndexMetaData currentMetaData = currentState.getMetaData().getIndexSafe(index);
+                        final IndexMetaData updatedMetaData = updatedState.metaData().getIndexSafe(index);
+                        indicesService.verifyIndexMetadata(currentMetaData, updatedMetaData);
+                    }
+                } catch (IOException ex) {
+                    throw ExceptionsHelper.convertToElastic(ex);
                 }
                 return updatedState;
             }

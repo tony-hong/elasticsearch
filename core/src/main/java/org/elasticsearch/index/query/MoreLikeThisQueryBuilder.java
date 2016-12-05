@@ -53,10 +53,9 @@ import org.elasticsearch.common.xcontent.XContentParser;
 import org.elasticsearch.common.xcontent.XContentType;
 import org.elasticsearch.index.VersionType;
 import org.elasticsearch.index.mapper.MappedFieldType;
-import org.elasticsearch.index.mapper.core.KeywordFieldMapper.KeywordFieldType;
-import org.elasticsearch.index.mapper.core.StringFieldMapper.StringFieldType;
-import org.elasticsearch.index.mapper.core.TextFieldMapper.TextFieldType;
-import org.elasticsearch.index.mapper.internal.UidFieldMapper;
+import org.elasticsearch.index.mapper.UidFieldMapper;
+import org.elasticsearch.index.mapper.KeywordFieldMapper.KeywordFieldType;
+import org.elasticsearch.index.mapper.TextFieldMapper.TextFieldType;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -79,9 +78,7 @@ import static org.elasticsearch.index.mapper.Uid.createUidAsBytes;
  * The documents are provided as a set of strings and/or a list of {@link Item}.
  */
 public class MoreLikeThisQueryBuilder extends AbstractQueryBuilder<MoreLikeThisQueryBuilder> {
-
     public static final String NAME = "more_like_this";
-    public static final ParseField QUERY_NAME_FIELD = new ParseField(NAME, "mlt");
 
     public static final int DEFAULT_MAX_QUERY_TERMS = XMoreLikeThis.DEFAULT_MAX_QUERY_TERMS;
     public static final int DEFAULT_MIN_TERM_FREQ = XMoreLikeThis.DEFAULT_MIN_TERM_FREQ;
@@ -95,7 +92,7 @@ public class MoreLikeThisQueryBuilder extends AbstractQueryBuilder<MoreLikeThisQ
     public static final boolean DEFAULT_FAIL_ON_UNSUPPORTED_FIELDS = true;
 
     private static final Set<Class<? extends MappedFieldType>> SUPPORTED_FIELD_TYPES = new HashSet<>(
-            Arrays.asList(StringFieldType.class, TextFieldType.class, KeywordFieldType.class));
+            Arrays.asList(TextFieldType.class, KeywordFieldType.class));
 
     private interface Field {
         ParseField FIELDS = new ParseField("fields");
@@ -450,7 +447,7 @@ public class MoreLikeThisQueryBuilder extends AbstractQueryBuilder<MoreLikeThisQ
         }
 
         @Override
-        public final String toString() {
+        public String toString() {
             try {
                 XContentBuilder builder = XContentFactory.jsonBuilder();
                 builder.prettyPrint();
@@ -781,7 +778,7 @@ public class MoreLikeThisQueryBuilder extends AbstractQueryBuilder<MoreLikeThisQ
     protected void doXContent(XContentBuilder builder, Params params) throws IOException {
         builder.startObject(NAME);
         if (fields != null) {
-            builder.field(Field.FIELDS.getPreferredName(), fields);
+            builder.array(Field.FIELDS.getPreferredName(), fields);
         }
         buildLikeField(builder, Field.LIKE.getPreferredName(), likeTexts, likeItems);
         buildLikeField(builder, Field.UNLIKE.getPreferredName(), unlikeTexts, unlikeItems);
@@ -792,7 +789,7 @@ public class MoreLikeThisQueryBuilder extends AbstractQueryBuilder<MoreLikeThisQ
         builder.field(Field.MIN_WORD_LENGTH.getPreferredName(), minWordLength);
         builder.field(Field.MAX_WORD_LENGTH.getPreferredName(), maxWordLength);
         if (stopWords != null) {
-            builder.field(Field.STOP_WORDS.getPreferredName(), stopWords);
+            builder.array(Field.STOP_WORDS.getPreferredName(), stopWords);
         }
         if (analyzer != null) {
             builder.field(Field.ANALYZER.getPreferredName(), analyzer);
@@ -805,7 +802,7 @@ public class MoreLikeThisQueryBuilder extends AbstractQueryBuilder<MoreLikeThisQ
         builder.endObject();
     }
 
-    public static MoreLikeThisQueryBuilder fromXContent(QueryParseContext parseContext) throws IOException {
+    public static Optional<MoreLikeThisQueryBuilder> fromXContent(QueryParseContext parseContext) throws IOException {
         XContentParser parser = parseContext.parser();
 
         // document inputs
@@ -955,7 +952,7 @@ public class MoreLikeThisQueryBuilder extends AbstractQueryBuilder<MoreLikeThisQ
         if (stopWords != null) {
             moreLikeThisQueryBuilder.stopWords(stopWords);
         }
-        return moreLikeThisQueryBuilder;
+        return Optional.of(moreLikeThisQueryBuilder);
     }
 
     private static void parseLikeField(QueryParseContext parseContext, List<String> texts, List<Item> items) throws IOException {
@@ -1022,7 +1019,7 @@ public class MoreLikeThisQueryBuilder extends AbstractQueryBuilder<MoreLikeThisQ
         }
 
         // set analyzer
-        Analyzer analyzerObj = context.getAnalysisService().analyzer(analyzer);
+        Analyzer analyzerObj = context.getIndexAnalyzers().get(analyzer);
         if (analyzerObj == null) {
             analyzerObj = context.getMapperService().searchAnalyzer();
         }

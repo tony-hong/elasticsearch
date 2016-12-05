@@ -20,69 +20,93 @@
 package org.elasticsearch.painless.node;
 
 import org.elasticsearch.painless.Definition;
-import org.elasticsearch.painless.Variables;
-import org.objectweb.asm.Label;
+import org.elasticsearch.painless.Globals;
+import org.elasticsearch.painless.Locals;
+import org.elasticsearch.painless.Location;
 import org.elasticsearch.painless.MethodWriter;
+import org.objectweb.asm.Label;
+import org.objectweb.asm.Opcodes;
+
+import java.util.Arrays;
+import java.util.Set;
+
+import static java.util.Collections.emptyList;
 
 /**
  * Represents a for loop.
  */
 public final class SFor extends AStatement {
 
-    final int maxLoopCounter;
-    ANode initializer;
-    AExpression condition;
-    AExpression afterthought;
-    final SBlock block;
+    private ANode initializer;
+    private AExpression condition;
+    private AExpression afterthought;
+    private final SBlock block;
 
-    public SFor(int line, int offset, String location, int maxLoopCounter,
-                ANode initializer, AExpression condition, AExpression afterthought, SBlock block) {
-        super(line, offset, location);
+    private boolean continuous = false;
+
+    public SFor(Location location, ANode initializer, AExpression condition, AExpression afterthought, SBlock block) {
+        super(location);
 
         this.initializer = initializer;
         this.condition = condition;
         this.afterthought = afterthought;
         this.block = block;
-        this.maxLoopCounter = maxLoopCounter;
     }
 
     @Override
-    void analyze(Variables variables) {
-        variables.incrementScope();
+    void extractVariables(Set<String> variables) {
+        if (initializer != null) {
+            initializer.extractVariables(variables);
+        }
 
-        boolean continuous = false;
+        if (condition != null) {
+            condition.extractVariables(variables);
+        }
+
+        if (afterthought != null) {
+            afterthought.extractVariables(variables);
+        }
+
+        if (block != null) {
+            block.extractVariables(variables);
+        }
+    }
+
+    @Override
+    void analyze(Locals locals) {
+        locals = Locals.newLocalScope(locals);
 
         if (initializer != null) {
-            if (initializer instanceof SDeclBlock) {
-                ((SDeclBlock)initializer).analyze(variables);
+            if (initializer instanceof AStatement) {
+                initializer.analyze(locals);
             } else if (initializer instanceof AExpression) {
                 AExpression initializer = (AExpression)this.initializer;
 
                 initializer.read = false;
-                initializer.analyze(variables);
+                initializer.analyze(locals);
 
                 if (!initializer.statement) {
-                    throw new IllegalArgumentException(initializer.error("Not a statement."));
+                    throw createError(new IllegalArgumentException("Not a statement."));
                 }
             } else {
-                throw new IllegalStateException(error("Illegal tree structure."));
+                throw createError(new IllegalStateException("Illegal tree structure."));
             }
         }
 
         if (condition != null) {
             condition.expected = Definition.BOOLEAN_TYPE;
-            condition.analyze(variables);
-            condition = condition.cast(variables);
+            condition.analyze(locals);
+            condition = condition.cast(locals);
 
             if (condition.constant != null) {
                 continuous = (boolean)condition.constant;
 
                 if (!continuous) {
-                    throw new IllegalArgumentException(error("Extraneous for loop."));
+                    throw createError(new IllegalArgumentException("Extraneous for loop."));
                 }
 
                 if (block == null) {
-                    throw new IllegalArgumentException(error("For loop has no escape."));
+                    throw createError(new IllegalArgumentException("For loop has no escape."));
                 }
             }
         } else {
@@ -91,10 +115,10 @@ public final class SFor extends AStatement {
 
         if (afterthought != null) {
             afterthought.read = false;
-            afterthought.analyze(variables);
+            afterthought.analyze(locals);
 
             if (!afterthought.statement) {
-                throw new IllegalArgumentException(afterthought.error("Not a statement."));
+                throw createError(new IllegalArgumentException("Not a statement."));
             }
         }
 
@@ -102,10 +126,10 @@ public final class SFor extends AStatement {
             block.beginLoop = true;
             block.inLoop = true;
 
-            block.analyze(variables);
+            block.analyze(locals);
 
             if (block.loopEscape && !block.anyContinue) {
-                throw new IllegalArgumentException(error("Extraneous for loop."));
+                throw createError(new IllegalArgumentException("Extraneous for loop."));
             }
 
             if (continuous && !block.anyBreak) {
@@ -118,35 +142,33 @@ public final class SFor extends AStatement {
 
         statementCount = 1;
 
-        if (maxLoopCounter > 0) {
-            loopCounterSlot = variables.getVariable(location, "#loop").slot;
+        if (locals.hasVariable(Locals.LOOP)) {
+            loopCounter = locals.getVariable(location, Locals.LOOP);
         }
-
-        variables.decrementScope();
     }
 
     @Override
-    void write(MethodWriter writer) {
-        writeDebugInfo(writer);
+    void write(MethodWriter writer, Globals globals) {
+        writer.writeStatementOffset(location);
 
         Label start = new Label();
         Label begin = afterthought == null ? start : new Label();
         Label end = new Label();
 
         if (initializer instanceof SDeclBlock) {
-            ((SDeclBlock)initializer).write(writer);
+            initializer.write(writer, globals);
         } else if (initializer instanceof AExpression) {
             AExpression initializer = (AExpression)this.initializer;
 
-            initializer.write(writer);
+            initializer.write(writer, globals);
             writer.writePop(initializer.expected.sort.size);
         }
 
         writer.mark(start);
 
-        if (condition != null) {
-            condition.fals = end;
-            condition.write(writer);
+        if (condition != null && !continuous) {
+            condition.write(writer, globals);
+            writer.ifZCmp(Opcodes.IFEQ, end);
         }
 
         boolean allEscape = false;
@@ -160,15 +182,22 @@ public final class SFor extends AStatement {
                 ++statementCount;
             }
 
-            writer.writeLoopCounter(loopCounterSlot, statementCount);
-            block.write(writer);
+            if (loopCounter != null) {
+                writer.writeLoopCounter(loopCounter.getSlot(), statementCount, location);
+            }
+
+            block.continu = begin;
+            block.brake = end;
+            block.write(writer, globals);
         } else {
-            writer.writeLoopCounter(loopCounterSlot, 1);
+            if (loopCounter != null) {
+                writer.writeLoopCounter(loopCounter.getSlot(), 1, location);
+            }
         }
 
         if (afterthought != null) {
             writer.mark(begin);
-            afterthought.write(writer);
+            afterthought.write(writer, globals);
         }
 
         if (afterthought != null || !allEscape) {
@@ -176,5 +205,10 @@ public final class SFor extends AStatement {
         }
 
         writer.mark(end);
+    }
+
+    @Override
+    public String toString() {
+        return multilineToString(emptyList(), Arrays.asList(initializer, condition, afterthought, block));
     }
 }

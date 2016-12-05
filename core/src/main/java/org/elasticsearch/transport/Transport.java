@@ -20,6 +20,8 @@
 package org.elasticsearch.transport;
 
 import org.elasticsearch.cluster.node.DiscoveryNode;
+import org.elasticsearch.common.breaker.CircuitBreaker;
+import org.elasticsearch.common.breaker.NoopCircuitBreaker;
 import org.elasticsearch.common.component.LifecycleComponent;
 import org.elasticsearch.common.settings.Setting;
 import org.elasticsearch.common.settings.Setting.Property;
@@ -27,13 +29,11 @@ import org.elasticsearch.common.transport.BoundTransportAddress;
 import org.elasticsearch.common.transport.TransportAddress;
 
 import java.io.IOException;
+import java.net.UnknownHostException;
 import java.util.List;
 import java.util.Map;
 
-/**
- *
- */
-public interface Transport extends LifecycleComponent<Transport> {
+public interface Transport extends LifecycleComponent {
 
 
     Setting<Boolean> TRANSPORT_TCP_COMPRESS = Setting.boolSetting("transport.tcp.compress", false, Property.NodeScope);
@@ -54,12 +54,7 @@ public interface Transport extends LifecycleComponent<Transport> {
     /**
      * Returns an address from its string representation.
      */
-    TransportAddress[] addressesFromString(String address, int perAddressLimit) throws Exception;
-
-    /**
-     * Is the address type supported.
-     */
-    boolean addressSupported(Class<? extends TransportAddress> address);
+    TransportAddress[] addressesFromString(String address, int perAddressLimit) throws UnknownHostException;
 
     /**
      * Returns <tt>true</tt> if the node is connected.
@@ -67,15 +62,10 @@ public interface Transport extends LifecycleComponent<Transport> {
     boolean nodeConnected(DiscoveryNode node);
 
     /**
-     * Connects to the given node, if already connected, does nothing.
+     * Connects to a node with the given connection profile. Use {@link ConnectionProfile#LIGHT_PROFILE} when just connecting for ping
+     * and then disconnecting. If the node is already connected this method has no effect
      */
-    void connectToNode(DiscoveryNode node) throws ConnectTransportException;
-
-    /**
-     * Connects to a node in a light manner. Used when just connecting for ping and then
-     * disconnecting.
-     */
-    void connectToNodeLight(DiscoveryNode node) throws ConnectTransportException;
+    void connectToNode(DiscoveryNode node, ConnectionProfile connectionProfile) throws ConnectTransportException;
 
     /**
      * Disconnected from the given node, if not connected, will do nothing.
@@ -84,6 +74,7 @@ public interface Transport extends LifecycleComponent<Transport> {
 
     /**
      * Sends the request to the node.
+     * @throws NodeNotConnectedException if the given node is not connected
      */
     void sendRequest(DiscoveryNode node, long requestId, String action, TransportRequest request, TransportRequestOptions options) throws
         IOException, TransportException;
@@ -94,4 +85,8 @@ public interface Transport extends LifecycleComponent<Transport> {
     long serverOpen();
 
     List<String> getLocalAddresses();
+
+    default CircuitBreaker getInFlightRequestBreaker() {
+        return new NoopCircuitBreaker("in-flight-noop");
+    }
 }

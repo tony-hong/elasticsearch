@@ -19,17 +19,15 @@
 package org.elasticsearch.action.admin.cluster.node.tasks;
 
 import com.carrotsearch.randomizedtesting.RandomizedContext;
-import com.carrotsearch.randomizedtesting.generators.RandomInts;
+import com.carrotsearch.randomizedtesting.generators.RandomNumbers;
 import org.elasticsearch.action.ActionListener;
 import org.elasticsearch.action.admin.cluster.node.tasks.cancel.CancelTasksRequest;
 import org.elasticsearch.action.admin.cluster.node.tasks.cancel.CancelTasksResponse;
 import org.elasticsearch.action.admin.cluster.node.tasks.list.ListTasksRequest;
 import org.elasticsearch.action.admin.cluster.node.tasks.list.ListTasksResponse;
-import org.elasticsearch.action.admin.cluster.node.tasks.list.TaskInfo;
 import org.elasticsearch.action.support.nodes.BaseNodeRequest;
 import org.elasticsearch.action.support.nodes.BaseNodesRequest;
 import org.elasticsearch.action.support.replication.ClusterStateCreationUtils;
-import org.elasticsearch.cluster.ClusterName;
 import org.elasticsearch.cluster.node.DiscoveryNode;
 import org.elasticsearch.cluster.service.ClusterService;
 import org.elasticsearch.common.io.stream.StreamInput;
@@ -37,7 +35,9 @@ import org.elasticsearch.common.io.stream.StreamOutput;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.tasks.CancellableTask;
 import org.elasticsearch.tasks.Task;
+import org.elasticsearch.tasks.TaskCancelledException;
 import org.elasticsearch.tasks.TaskId;
+import org.elasticsearch.tasks.TaskInfo;
 import org.elasticsearch.threadpool.ThreadPool;
 import org.elasticsearch.transport.TransportService;
 
@@ -140,10 +140,10 @@ public class CancellableTasksTests extends TaskManagerTestCase {
 
         final CountDownLatch actionStartedLatch;
 
-        CancellableTestNodesAction(Settings settings, String actionName, ClusterName clusterName, ThreadPool threadPool,
+        CancellableTestNodesAction(Settings settings, String actionName, ThreadPool threadPool,
                                    ClusterService clusterService, TransportService transportService, boolean shouldBlock, CountDownLatch
                                        actionStartedLatch) {
-            super(settings, actionName, clusterName, threadPool, clusterService, transportService, CancellableNodesRequest::new,
+            super(settings, actionName, threadPool, clusterService, transportService, CancellableNodesRequest::new,
                 CancellableNodeRequest::new);
             this.shouldBlock = shouldBlock;
             this.actionStartedLatch = actionStartedLatch;
@@ -169,7 +169,7 @@ public class CancellableTasksTests extends TaskManagerTestCase {
                 try {
                     awaitBusy(() -> {
                         if (((CancellableTask) task).isCancelled()) {
-                            throw new RuntimeException("Cancelled");
+                            throw new TaskCancelledException("Cancelled");
                         }
                         return false;
                     });
@@ -202,7 +202,7 @@ public class CancellableTasksTests extends TaskManagerTestCase {
         for (int i = 0; i < testNodes.length; i++) {
             boolean shouldBlock = blockOnNodes.contains(testNodes[i]);
             logger.info("The action in the node [{}] should block: [{}]", testNodes[i].discoveryNode.getId(), shouldBlock);
-            actions[i] = new CancellableTestNodesAction(Settings.EMPTY, "testAction", CLUSTER_NAME, threadPool, testNodes[i]
+            actions[i] = new CancellableTestNodesAction(CLUSTER_SETTINGS, "testAction", threadPool, testNodes[i]
                 .clusterService, testNodes[i].transportService, shouldBlock, actionLatch);
         }
         Task task = actions[0].execute(request, listener);
@@ -231,7 +231,7 @@ public class CancellableTasksTests extends TaskManagerTestCase {
             }
 
             @Override
-            public void onFailure(Throwable e) {
+            public void onFailure(Exception e) {
                 throwableReference.set(e);
                 responseLatch.countDown();
             }
@@ -309,7 +309,7 @@ public class CancellableTasksTests extends TaskManagerTestCase {
             }
 
             @Override
-            public void onFailure(Throwable e) {
+            public void onFailure(Exception e) {
                 throwableReference.set(e);
                 responseLatch.countDown();
             }
@@ -380,9 +380,9 @@ public class CancellableTasksTests extends TaskManagerTestCase {
         // Introduce an additional pseudo random repeatable race conditions
         String delayName = RandomizedContext.current().getRunnerSeedAsString() + ":" + nodeId + ":" + name;
         Random random = new Random(delayName.hashCode());
-        if (RandomInts.randomIntBetween(random, 0, 10) < 1) {
+        if (RandomNumbers.randomIntBetween(random, 0, 10) < 1) {
             try {
-                Thread.sleep(RandomInts.randomIntBetween(random, 20, 50));
+                Thread.sleep(RandomNumbers.randomIntBetween(random, 20, 50));
             } catch (InterruptedException ex) {
                 Thread.currentThread().interrupt();
             }

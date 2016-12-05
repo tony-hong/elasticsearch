@@ -19,30 +19,28 @@
 
 package org.elasticsearch.index.query;
 
+import org.apache.lucene.document.LatLonPoint;
+import org.apache.lucene.geo.Rectangle;
 import org.apache.lucene.search.MatchNoDocsQuery;
 import org.apache.lucene.search.Query;
-import org.apache.lucene.spatial.geopoint.document.GeoPointField;
-import org.apache.lucene.spatial.geopoint.search.GeoPointInBBoxQuery;
 import org.elasticsearch.ElasticsearchParseException;
 import org.elasticsearch.Version;
 import org.elasticsearch.common.Numbers;
 import org.elasticsearch.common.ParseField;
 import org.elasticsearch.common.ParsingException;
+import org.elasticsearch.common.geo.GeoHashUtils;
 import org.elasticsearch.common.geo.GeoPoint;
 import org.elasticsearch.common.geo.GeoUtils;
 import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.io.stream.StreamOutput;
 import org.elasticsearch.common.xcontent.XContentBuilder;
 import org.elasticsearch.common.xcontent.XContentParser;
-import org.elasticsearch.index.fielddata.IndexGeoPointFieldData;
+import org.elasticsearch.index.mapper.BaseGeoPointFieldMapper;
 import org.elasticsearch.index.mapper.MappedFieldType;
-import org.elasticsearch.index.mapper.geo.BaseGeoPointFieldMapper;
-import org.elasticsearch.index.mapper.geo.GeoPointFieldMapperLegacy;
-import org.elasticsearch.index.search.geo.InMemoryGeoBoundingBoxQuery;
-import org.elasticsearch.index.search.geo.IndexedGeoBoundingBoxQuery;
 
 import java.io.IOException;
 import java.util.Objects;
+import java.util.Optional;
 
 /**
  * Creates a Lucene query that will filter for all documents that lie within the specified
@@ -52,9 +50,7 @@ import java.util.Objects;
  * enabled.
  * */
 public class GeoBoundingBoxQueryBuilder extends AbstractQueryBuilder<GeoBoundingBoxQueryBuilder> {
-    /** Name of the query. */
     public static final String NAME = "geo_bounding_box";
-    public static final ParseField QUERY_NAME_FIELD = new ParseField(NAME, "geo_bbox");
 
     /** Default type for executing this query (memory as of this writing). */
     public static final GeoExecType DEFAULT_TYPE = GeoExecType.MEMORY;
@@ -154,7 +150,13 @@ public class GeoBoundingBoxQueryBuilder extends AbstractQueryBuilder<GeoBounding
             if (top < bottom) {
                 throw new IllegalArgumentException("top is below bottom corner: " +
                             top + " vs. " + bottom);
-                }
+            } else if (top == bottom) {
+                throw new IllegalArgumentException("top cannot be the same as bottom: " +
+                    top + " == " + bottom);
+            } else if (left == right) {
+                throw new IllegalArgumentException("left cannot be the same as right: " +
+                    left + " == " + right);
+            }
 
                 // we do not check longitudes as the query generation code can deal with flipped left/right values
         }
@@ -171,6 +173,16 @@ public class GeoBoundingBoxQueryBuilder extends AbstractQueryBuilder<GeoBounding
      * */
     public GeoBoundingBoxQueryBuilder setCorners(GeoPoint topLeft, GeoPoint bottomRight) {
         return setCorners(topLeft.getLat(), topLeft.getLon(), bottomRight.getLat(), bottomRight.getLon());
+    }
+
+    /**
+     * Adds points from a single geohash.
+     * @param geohash The geohash for computing the bounding box.
+     */
+    public GeoBoundingBoxQueryBuilder setCorners(final String geohash) {
+        // get the bounding box of the geohash and set topLeft and bottomRight
+        Rectangle ghBBox = GeoHashUtils.bbox(geohash);
+        return setCorners(new GeoPoint(ghBBox.maxLat, ghBBox.minLon), new GeoPoint(ghBBox.minLat, ghBBox.maxLon));
     }
 
     /**
@@ -279,7 +291,7 @@ public class GeoBoundingBoxQueryBuilder extends AbstractQueryBuilder<GeoBounding
 
     QueryValidationException checkLatLon(boolean indexCreatedBeforeV2_0) {
         // validation was not available prior to 2.x, so to support bwc percolation queries we only ignore_malformed on 2.x created indexes
-        if (GeoValidationMethod.isIgnoreMalformed(validationMethod) == true || indexCreatedBeforeV2_0) {
+        if (GeoValidationMethod.isIgnoreMalformed(validationMethod) || indexCreatedBeforeV2_0) {
             return null;
         }
 
@@ -341,31 +353,8 @@ public class GeoBoundingBoxQueryBuilder extends AbstractQueryBuilder<GeoBounding
             }
         }
 
-        if (indexVersionCreated.onOrAfter(Version.V_2_2_0)) {
-            // if index created V_2_2 use (soon to be legacy) numeric encoding postings format
-            // if index created V_2_3 > use prefix encoded postings format
-            final GeoPointField.TermEncoding encoding = (indexVersionCreated.before(Version.V_2_3_0)) ?
-                GeoPointField.TermEncoding.NUMERIC : GeoPointField.TermEncoding.PREFIX;
-            return new GeoPointInBBoxQuery(fieldType.name(), encoding, luceneBottomRight.lat(), luceneTopLeft.lat(),
-                luceneTopLeft.lon(), luceneBottomRight.lon());
-        }
-
-        Query query;
-        switch(type) {
-            case INDEXED:
-                GeoPointFieldMapperLegacy.GeoPointFieldType geoFieldType = ((GeoPointFieldMapperLegacy.GeoPointFieldType) fieldType);
-                query = IndexedGeoBoundingBoxQuery.create(luceneTopLeft, luceneBottomRight, geoFieldType);
-                break;
-            case MEMORY:
-                IndexGeoPointFieldData indexFieldData = context.getForField(fieldType);
-                query = new InMemoryGeoBoundingBoxQuery(luceneTopLeft, luceneBottomRight, indexFieldData);
-                break;
-            default:
-                // Someone extended the type enum w/o adjusting this switch statement.
-                throw new IllegalStateException("geo bounding box type [" + type + "] not supported.");
-        }
-
-        return query;
+        return LatLonPoint.newBoxQuery(fieldType.name(), luceneBottomRight.getLat(), luceneTopLeft.getLat(),
+            luceneTopLeft.getLon(), luceneBottomRight.getLon());
     }
 
     @Override
@@ -385,7 +374,7 @@ public class GeoBoundingBoxQueryBuilder extends AbstractQueryBuilder<GeoBounding
         builder.endObject();
     }
 
-    public static GeoBoundingBoxQueryBuilder fromXContent(QueryParseContext parseContext) throws IOException {
+    public static Optional<GeoBoundingBoxQueryBuilder> fromXContent(QueryParseContext parseContext) throws IOException {
         XContentParser parser = parseContext.parser();
 
         String fieldName = null;
@@ -449,12 +438,12 @@ public class GeoBoundingBoxQueryBuilder extends AbstractQueryBuilder<GeoBounding
                                 left = sparse.getLon();
                             } else {
                                 throw new ElasticsearchParseException("failed to parse [{}] query. unexpected field [{}]",
-                                        QUERY_NAME_FIELD.getPreferredName(), currentFieldName);
+                                        NAME, currentFieldName);
                             }
                         }
                     } else {
                         throw new ElasticsearchParseException("failed to parse [{}] query. field name expected but [{}] found",
-                                QUERY_NAME_FIELD.getPreferredName(), token);
+                                NAME, token);
                     }
                 }
             } else if (token.isValue()) {
@@ -477,7 +466,7 @@ public class GeoBoundingBoxQueryBuilder extends AbstractQueryBuilder<GeoBounding
                     ignoreMalformed = parser.booleanValue();
                 } else {
                     throw new ParsingException(parser.getTokenLocation(), "failed to parse [{}] query. unexpected field [{}]",
-                            QUERY_NAME_FIELD.getPreferredName(), currentFieldName);
+                            NAME, currentFieldName);
                 }
             }
         }
@@ -496,7 +485,7 @@ public class GeoBoundingBoxQueryBuilder extends AbstractQueryBuilder<GeoBounding
         } else {
             builder.setValidationMethod(GeoValidationMethod.infer(coerce, ignoreMalformed));
         }
-        return builder;
+        return Optional.of(builder);
     }
 
     @Override

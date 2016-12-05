@@ -22,8 +22,6 @@ package org.elasticsearch.action.fieldstats;
 import org.elasticsearch.action.support.broadcast.BroadcastOperationRequestBuilder;
 import org.elasticsearch.client.ElasticsearchClient;
 
-/**
- */
 public class FieldStatsRequestBuilder extends
     BroadcastOperationRequestBuilder<FieldStatsRequest, FieldStatsResponse, FieldStatsRequestBuilder> {
 
@@ -43,6 +41,11 @@ public class FieldStatsRequestBuilder extends
 
     public FieldStatsRequestBuilder setLevel(String level) {
         request().level(level);
+        return this;
+    }
+
+    public FieldStatsRequestBuilder setUseCache(boolean useCache) {
+        request().setUseCache(useCache);
         return this;
     }
 }

@@ -19,62 +19,62 @@
 
 package org.elasticsearch.percolator;
 
-import org.elasticsearch.action.ActionModule;
-import org.elasticsearch.client.Client;
-import org.elasticsearch.client.transport.TransportClient;
-import org.elasticsearch.common.network.NetworkModule;
+import org.elasticsearch.action.ActionRequest;
+import org.elasticsearch.action.ActionResponse;
+import org.elasticsearch.common.settings.Setting;
 import org.elasticsearch.common.settings.Settings;
-import org.elasticsearch.common.settings.SettingsModule;
-import org.elasticsearch.indices.IndicesModule;
+import org.elasticsearch.index.mapper.Mapper;
+import org.elasticsearch.plugins.ActionPlugin;
+import org.elasticsearch.plugins.MapperPlugin;
 import org.elasticsearch.plugins.Plugin;
-import org.elasticsearch.search.SearchModule;
+import org.elasticsearch.plugins.SearchPlugin;
+import org.elasticsearch.rest.RestHandler;
+import org.elasticsearch.search.fetch.FetchSubPhase;
 
-public class PercolatorPlugin extends Plugin {
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
+import java.util.Map;
 
-    public static final String NAME = "percolator";
+import static java.util.Collections.singletonList;
 
-    private final boolean transportClientMode;
+public class PercolatorPlugin extends Plugin implements MapperPlugin, ActionPlugin, SearchPlugin {
+
+    private final Settings settings;
 
     public PercolatorPlugin(Settings settings) {
-        this.transportClientMode = transportClientMode(settings);
+        this.settings = settings;
     }
 
     @Override
-    public String name() {
-        return NAME;
+    public List<ActionHandler<? extends ActionRequest, ? extends ActionResponse>> getActions() {
+        return Arrays.asList(new ActionHandler<>(PercolateAction.INSTANCE, TransportPercolateAction.class),
+                new ActionHandler<>(MultiPercolateAction.INSTANCE, TransportMultiPercolateAction.class));
     }
 
     @Override
-    public String description() {
-        return "Percolator module adds capability to index queries and query these queries by specifying documents";
+    public List<Class<? extends RestHandler>> getRestHandlers() {
+        return Arrays.asList(RestPercolateAction.class, RestMultiPercolateAction.class);
     }
 
-    public void onModule(ActionModule module) {
-        module.registerAction(PercolateAction.INSTANCE, TransportPercolateAction.class);
-        module.registerAction(MultiPercolateAction.INSTANCE, TransportMultiPercolateAction.class);
+    @Override
+    public List<QuerySpec<?>> getQueries() {
+        return singletonList(new QuerySpec<>(PercolateQueryBuilder.NAME, PercolateQueryBuilder::new, PercolateQueryBuilder::fromXContent));
     }
 
-    public void onModule(NetworkModule module) {
-        if (transportClientMode == false) {
-            module.registerRestHandler(RestPercolateAction.class);
-            module.registerRestHandler(RestMultiPercolateAction.class);
-        }
+    @Override
+    public List<FetchSubPhase> getFetchSubPhases(FetchPhaseConstructionContext context) {
+        return singletonList(new PercolatorHighlightSubFetchPhase(settings, context.getHighlighters()));
     }
 
-    public void onModule(IndicesModule module) {
-        module.registerMapper(PercolatorFieldMapper.CONTENT_TYPE, new PercolatorFieldMapper.TypeParser());
+    @Override
+    public List<Setting<?>> getSettings() {
+        return Collections.singletonList(PercolatorFieldMapper.INDEX_MAP_UNMAPPED_FIELDS_AS_STRING_SETTING);
     }
 
-    public void onModule(SearchModule module) {
-        module.registerQuery(PercolateQueryBuilder::new, PercolateQueryBuilder::fromXContent, PercolateQueryBuilder.QUERY_NAME_FIELD);
-        module.registerFetchSubPhase(PercolatorHighlightSubFetchPhase.class);
+    @Override
+    public Map<String, Mapper.TypeParser> getMappers() {
+        return Collections.singletonMap(PercolatorFieldMapper.CONTENT_TYPE, new PercolatorFieldMapper.TypeParser());
     }
 
-    public void onModule(SettingsModule module) {
-        module.registerSetting(PercolatorFieldMapper.INDEX_MAP_UNMAPPED_FIELDS_AS_STRING_SETTING);
-    }
-
-    static boolean transportClientMode(Settings settings) {
-        return TransportClient.CLIENT_TYPE.equals(settings.get(Client.CLIENT_TYPE_SETTING_S.getKey()));
-    }
 }

@@ -22,6 +22,7 @@ package org.elasticsearch.ingest;
 import org.elasticsearch.ElasticsearchException;
 import org.elasticsearch.ElasticsearchParseException;
 import org.elasticsearch.ExceptionsHelper;
+import org.elasticsearch.action.DocWriteResponse;
 import org.elasticsearch.action.bulk.BulkItemResponse;
 import org.elasticsearch.action.bulk.BulkRequest;
 import org.elasticsearch.action.bulk.BulkResponse;
@@ -37,13 +38,11 @@ import org.elasticsearch.action.ingest.SimulatePipelineResponse;
 import org.elasticsearch.action.ingest.WritePipelineResponse;
 import org.elasticsearch.common.bytes.BytesReference;
 import org.elasticsearch.common.settings.Settings;
-import org.elasticsearch.ingest.core.IngestDocument;
-import org.elasticsearch.node.NodeModule;
 import org.elasticsearch.plugins.Plugin;
 import org.elasticsearch.test.ESIntegTestCase;
 
+import java.util.Arrays;
 import java.util.Collection;
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.ExecutionException;
@@ -69,7 +68,7 @@ public class IngestClientIT extends ESIntegTestCase {
 
     @Override
     protected Collection<Class<? extends Plugin>> nodePlugins() {
-        return pluginList(IngestPlugin.class);
+        return Arrays.asList(IngestTestPlugin.class);
     }
 
     public void testSimulate() throws Exception {
@@ -121,7 +120,7 @@ public class IngestClientIT extends ESIntegTestCase {
         source.put("foo", "bar");
         source.put("fail", false);
         source.put("processed", true);
-        IngestDocument ingestDocument = new IngestDocument("index", "type", "id", null, null, null, null, source);
+        IngestDocument ingestDocument = new IngestDocument("index", "type", "id", null, null, source);
         assertThat(simulateDocumentBaseResult.getIngestDocument().getSourceAndMetadata(), equalTo(ingestDocument.getSourceAndMetadata()));
         assertThat(simulateDocumentBaseResult.getFailure(), nullValue());
     }
@@ -163,7 +162,7 @@ public class IngestClientIT extends ESIntegTestCase {
                     itemResponse.isFailed(), is(false));
                 assertThat(indexResponse, notNullValue());
                 assertThat(indexResponse.getId(), equalTo(Integer.toString(i)));
-                assertThat(indexResponse.isCreated(), is(true));
+                assertEquals(DocWriteResponse.Result.CREATED, indexResponse.getResult());
             }
         }
     }
@@ -227,35 +226,6 @@ public class IngestClientIT extends ESIntegTestCase {
             ElasticsearchParseException ex = (ElasticsearchParseException) ExceptionsHelper.unwrap(e, ElasticsearchParseException.class);
             assertNotNull(ex);
             assertThat(ex.getMessage(), equalTo("processor [test] doesn't support one or more provided configuration parameters [unused]"));
-        }
-    }
-
-    @Override
-    protected Collection<Class<? extends Plugin>> getMockPlugins() {
-        return Collections.singletonList(TestSeedPlugin.class);
-    }
-
-    public static class IngestPlugin extends Plugin {
-
-        @Override
-        public String name() {
-            return "ingest";
-        }
-
-        @Override
-        public String description() {
-            return "ingest mock";
-        }
-
-        public void onModule(NodeModule nodeModule) {
-            nodeModule.registerProcessor("test", (templateService, registry) -> config ->
-                new TestProcessor("id", "test", ingestDocument -> {
-                    ingestDocument.setFieldValue("processed", true);
-                    if (ingestDocument.getFieldValue("fail", Boolean.class)) {
-                        throw new IllegalArgumentException("test processor failed");
-                    }
-                })
-            );
         }
     }
 }

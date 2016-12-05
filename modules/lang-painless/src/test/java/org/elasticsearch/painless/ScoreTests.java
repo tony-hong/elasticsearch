@@ -19,12 +19,11 @@
 
 package org.elasticsearch.painless;
 
-import java.io.IOException;
-import java.util.Collections;
-import java.util.concurrent.atomic.AtomicBoolean;
-
 import org.apache.lucene.search.DocIdSetIterator;
 import org.apache.lucene.search.Scorer;
+
+import java.io.IOException;
+import java.util.Collections;
 
 public class ScoreTests extends ScriptTestCase {
 
@@ -54,7 +53,8 @@ public class ScoreTests extends ScriptTestCase {
                 public float score() throws IOException {
                     return 2.5f;
                 }
-            }));
+            },
+            true));
     }
 
     public void testScoreNotUsed() {
@@ -64,7 +64,8 @@ public class ScoreTests extends ScriptTestCase {
                 public float score() throws IOException {
                     throw new AssertionError("score() should not be called");
                 }
-            }));
+            },
+            true));
     }
 
     public void testScoreCached() {
@@ -78,6 +79,7 @@ public class ScoreTests extends ScriptTestCase {
                     }
                     throw new AssertionError("score() should not be called twice");
                 }
-            }));
+            },
+            true));
     }
 }

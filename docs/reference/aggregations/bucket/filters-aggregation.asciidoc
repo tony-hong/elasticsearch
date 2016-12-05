@@ -1,7 +1,7 @@
 [[search-aggregations-bucket-filters-aggregation]]
 === Filters Aggregation
 
-Defines a multi bucket aggregations where each bucket is associated with a
+Defines a multi bucket aggregation where each bucket is associated with a
 filter. Each bucket will collect all documents that match its associated
 filter.
 
@@ -107,7 +107,7 @@ request.  The response for this example would be:
         {
           "doc_count" : 34,
           "monthly" : {
-            "buckets : [
+            "buckets" : [
               ... // the histogram monthly breakdown
             ]
           }
@@ -115,7 +115,7 @@ request.  The response for this example would be:
         {
           "doc_count" : 439,
           "monthly" : {
-            "buckets : [
+            "buckets" : [
               ... // the histogram monthly breakdown
             ]
           }

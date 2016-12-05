@@ -19,18 +19,20 @@
 
 package org.elasticsearch.bootstrap;
 
+import org.apache.logging.log4j.Logger;
+import org.apache.logging.log4j.message.ParameterizedMessage;
+import org.apache.logging.log4j.util.Supplier;
 import org.apache.lucene.util.Constants;
-import org.apache.lucene.util.SuppressForbidden;
+import org.elasticsearch.common.SuppressForbidden;
 import org.elasticsearch.common.io.PathUtils;
-import org.elasticsearch.common.logging.ESLogger;
 import org.elasticsearch.common.logging.Loggers;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.transport.BoundTransportAddress;
 import org.elasticsearch.common.transport.TransportAddress;
-import org.elasticsearch.discovery.zen.elect.ElectMasterService;
 import org.elasticsearch.monitor.jvm.JvmInfo;
 import org.elasticsearch.monitor.process.ProcessProbe;
 import org.elasticsearch.node.Node;
+import org.elasticsearch.node.NodeValidationException;
 
 import java.io.BufferedReader;
 import java.io.IOException;
@@ -41,13 +43,13 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
+import java.util.function.Predicate;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
- * We enforce limits once any network host is configured. In this case we assume the node is running in production
- * and all production limit checks must pass. This should be extended as we go to settings like:
- * - discovery.zen.ping.unicast.hosts is set if we use zen disco
- * - ensure we can write in all data directories
- * - fail if the default cluster.name is used, if this is setup on network a real clustername should be used?
+ * We enforce bootstrap checks once a node has the transport protocol bound to a non-loopback interface. In this case we assume the node is
+ * running in production and all bootstrap checks must pass.
  */
 final class BootstrapCheck {
 
@@ -55,58 +57,53 @@ final class BootstrapCheck {
     }
 
     /**
-     * checks the current limits against the snapshot or release build
-     * checks
+     * Executes the bootstrap checks if the node has the transport protocol bound to a non-loopback interface.
      *
      * @param settings              the current node settings
      * @param boundTransportAddress the node network bindings
      */
-    static void check(final Settings settings, final BoundTransportAddress boundTransportAddress) {
+    static void check(final Settings settings, final BoundTransportAddress boundTransportAddress) throws NodeValidationException {
         check(
                 enforceLimits(boundTransportAddress),
-                BootstrapSettings.IGNORE_SYSTEM_BOOTSTRAP_CHECKS.get(settings),
                 checks(settings),
                 Node.NODE_NAME_SETTING.get(settings));
     }
 
     /**
-     * executes the provided checks and fails the node if
-     * enforceLimits is true, otherwise logs warnings
+     * Executes the provided checks and fails the node if {@code enforceLimits} is {@code true}, otherwise logs warnings.
      *
-     * @param enforceLimits      true if the checks should be enforced or
-     *                           otherwise warned
-     * @param ignoreSystemChecks true if system checks should be enforced
-     *                           or otherwise warned
-     * @param checks             the checks to execute
-     * @param nodeName           the node name to be used as a logging prefix
+     * @param enforceLimits {@code true} if the checks should be enforced or otherwise warned
+     * @param checks        the checks to execute
+     * @param nodeName      the node name to be used as a logging prefix
      */
-    // visible for testing
-    static void check(final boolean enforceLimits, final boolean ignoreSystemChecks, final List<Check> checks, final String nodeName) {
-        check(enforceLimits, ignoreSystemChecks, checks, Loggers.getLogger(BootstrapCheck.class, nodeName));
+    static void check(
+        final boolean enforceLimits,
+        final List<Check> checks,
+        final String nodeName) throws NodeValidationException {
+        check(enforceLimits, checks, Loggers.getLogger(BootstrapCheck.class, nodeName));
     }
 
     /**
-     * executes the provided checks and fails the node if
-     * enforceLimits is true, otherwise logs warnings
+     * Executes the provided checks and fails the node if {@code enforceLimits} is {@code true}, otherwise logs warnings.
      *
-     * @param enforceLimits      true if the checks should be enforced or
-     *                           otherwise warned
-     * @param ignoreSystemChecks true if system checks should be enforced
-     *                           or otherwise warned
-     * @param checks             the checks to execute
-     * @param logger             the logger to
+     * @param enforceLimits {@code true} if the checks should be enforced or otherwise warned
+     * @param checks        the checks to execute
+     * @param logger        the logger to
      */
     static void check(
             final boolean enforceLimits,
-            final boolean ignoreSystemChecks,
             final List<Check> checks,
-            final ESLogger logger) {
+            final Logger logger) throws NodeValidationException {
         final List<String> errors = new ArrayList<>();
         final List<String> ignoredErrors = new ArrayList<>();
 
+        if (enforceLimits) {
+            logger.info("bound or publishing to a non-loopback or non-link-local address, enforcing bootstrap checks");
+        }
+
         for (final Check check : checks) {
             if (check.check()) {
-                if (!enforceLimits || (check.isSystemCheck() && ignoreSystemChecks)) {
+                if (!enforceLimits && !check.alwaysEnforce()) {
                     ignoredErrors.add(check.errorMessage());
                 } else {
                     errors.add(check.errorMessage());
@@ -122,27 +119,28 @@ final class BootstrapCheck {
             final List<String> messages = new ArrayList<>(1 + errors.size());
             messages.add("bootstrap checks failed");
             messages.addAll(errors);
-            final RuntimeException re = new RuntimeException(String.join("\n", messages));
-            errors.stream().map(IllegalStateException::new).forEach(re::addSuppressed);
-            throw re;
+            final NodeValidationException ne = new NodeValidationException(String.join("\n", messages));
+            errors.stream().map(IllegalStateException::new).forEach(ne::addSuppressed);
+            throw ne;
         }
 
     }
 
-    static void log(final ESLogger logger, final String error) {
+    static void log(final Logger logger, final String error) {
         logger.warn(error);
     }
 
     /**
-     * Tests if the checks should be enforced
+     * Tests if the checks should be enforced.
      *
      * @param boundTransportAddress the node network bindings
-     * @return true if the checks should be enforced
+     * @return {@code true} if the checks should be enforced
      */
-    // visible for testing
     static boolean enforceLimits(BoundTransportAddress boundTransportAddress) {
-        return !(Arrays.stream(boundTransportAddress.boundAddresses()).allMatch(TransportAddress::isLoopbackOrLinkLocalAddress) &&
-                boundTransportAddress.publishAddress().isLoopbackOrLinkLocalAddress());
+        Predicate<TransportAddress> isLoopbackOrLinkLocalAddress = t -> t.address().getAddress().isLinkLocalAddress()
+            || t.address().getAddress().isLoopbackAddress();
+        return !(Arrays.stream(boundTransportAddress.boundAddresses()).allMatch(isLoopbackOrLinkLocalAddress) &&
+                isLoopbackOrLinkLocalAddress.test(boundTransportAddress.publishAddress()));
     }
 
     // the list of checks to execute
@@ -152,47 +150,47 @@ final class BootstrapCheck {
         final FileDescriptorCheck fileDescriptorCheck
             = Constants.MAC_OS_X ? new OsXFileDescriptorCheck() : new FileDescriptorCheck();
         checks.add(fileDescriptorCheck);
-        checks.add(new MlockallCheck(BootstrapSettings.MLOCKALL_SETTING.get(settings)));
+        checks.add(new MlockallCheck(BootstrapSettings.MEMORY_LOCK_SETTING.get(settings)));
         if (Constants.LINUX) {
             checks.add(new MaxNumberOfThreadsCheck());
         }
         if (Constants.LINUX || Constants.MAC_OS_X) {
             checks.add(new MaxSizeVirtualMemoryCheck());
         }
-        checks.add(new MinMasterNodesCheck(ElectMasterService.DISCOVERY_ZEN_MINIMUM_MASTER_NODES_SETTING.exists(settings)));
         if (Constants.LINUX) {
             checks.add(new MaxMapCountCheck());
         }
         checks.add(new ClientJvmCheck());
+        checks.add(new UseSerialGCCheck());
+        checks.add(new SystemCallFilterCheck(BootstrapSettings.SECCOMP_SETTING.get(settings)));
+        checks.add(new OnErrorCheck());
+        checks.add(new OnOutOfMemoryErrorCheck());
+        checks.add(new G1GCCheck());
         return Collections.unmodifiableList(checks);
     }
 
     /**
-     * Encapsulates a limit check
+     * Encapsulates a bootstrap check.
      */
     interface Check {
 
         /**
-         * test if the node fails the check
+         * Test if the node fails the check.
          *
-         * @return true if the node failed the check
+         * @return {@code true} if the node failed the check
          */
         boolean check();
 
         /**
-         * the message for a failed check
+         * The error message for a failed check.
          *
          * @return the error message on check failure
          */
         String errorMessage();
 
-        /**
-         * test if the check is a system-level check
-         *
-         * @return true if the check is a system-level check as opposed
-         * to an Elasticsearch-level check
-         */
-        boolean isSystemCheck();
+        default boolean alwaysEnforce() {
+            return false;
+        }
 
     }
 
@@ -226,11 +224,6 @@ final class BootstrapCheck {
             return JvmInfo.jvmInfo().getConfiguredMaxHeapSize();
         }
 
-        @Override
-        public final boolean isSystemCheck() {
-            return false;
-        }
-
     }
 
     static class OsXFileDescriptorCheck extends FileDescriptorCheck {
@@ -245,7 +238,6 @@ final class BootstrapCheck {
 
     }
 
-    // visible for testing
     static class FileDescriptorCheck implements Check {
 
         private final int limit;
@@ -270,7 +262,7 @@ final class BootstrapCheck {
         public final String errorMessage() {
             return String.format(
                 Locale.ROOT,
-                "max file descriptors [%d] for elasticsearch process likely too low, increase to at least [%d]",
+                "max file descriptors [%d] for elasticsearch process is too low, increase to at least [%d]",
                 getMaxFileDescriptorCount(),
                 limit
             );
@@ -281,14 +273,8 @@ final class BootstrapCheck {
             return ProcessProbe.getInstance().getMaxFileDescriptorCount();
         }
 
-        @Override
-        public final boolean isSystemCheck() {
-            return true;
-        }
-
     }
 
-    // visible for testing
     static class MlockallCheck implements Check {
 
         private final boolean mlockallSet;
@@ -312,42 +298,12 @@ final class BootstrapCheck {
             return Natives.isMemoryLocked();
         }
 
-        @Override
-        public final boolean isSystemCheck() {
-            return true;
-        }
-
-    }
-
-    static class MinMasterNodesCheck implements Check {
-
-        final boolean minMasterNodesIsSet;
-
-        MinMasterNodesCheck(boolean minMasterNodesIsSet) {
-            this.minMasterNodesIsSet = minMasterNodesIsSet;
-        }
-
-        @Override
-        public boolean check() {
-            return minMasterNodesIsSet == false;
-        }
-
-        @Override
-        public String errorMessage() {
-            return "please set [" + ElectMasterService.DISCOVERY_ZEN_MINIMUM_MASTER_NODES_SETTING.getKey() +
-                "] to a majority of the number of master eligible nodes in your cluster";
-        }
-
-        @Override
-        public final boolean isSystemCheck() {
-            return false;
-        }
-
     }
 
     static class MaxNumberOfThreadsCheck implements Check {
 
-        private final long maxNumberOfThreadsThreshold = 1 << 11;
+        // this should be plenty for machines up to 256 cores
+        private final long maxNumberOfThreadsThreshold = 1 << 12;
 
         @Override
         public boolean check() {
@@ -358,7 +314,7 @@ final class BootstrapCheck {
         public String errorMessage() {
             return String.format(
                 Locale.ROOT,
-                "max number of threads [%d] for user [%s] likely too low, increase to at least [%d]",
+                "max number of threads [%d] for user [%s] is too low, increase to at least [%d]",
                 getMaxNumberOfThreads(),
                 BootstrapInfo.getSystemProperties().get("user.name"),
                 maxNumberOfThreadsThreshold);
@@ -367,11 +323,6 @@ final class BootstrapCheck {
         // visible for testing
         long getMaxNumberOfThreads() {
             return JNANatives.MAX_NUMBER_OF_THREADS;
-        }
-
-        @Override
-        public final boolean isSystemCheck() {
-            return true;
         }
 
     }
@@ -387,7 +338,7 @@ final class BootstrapCheck {
         public String errorMessage() {
             return String.format(
                 Locale.ROOT,
-                "max size virtual memory [%d] for user [%s] likely too low, increase to [unlimited]",
+                "max size virtual memory [%d] for user [%s] is too low, increase to [unlimited]",
                 getMaxSizeVirtualMemory(),
                 BootstrapInfo.getSystemProperties().get("user.name"));
         }
@@ -400,11 +351,6 @@ final class BootstrapCheck {
         // visible for testing
         long getMaxSizeVirtualMemory() {
             return JNANatives.MAX_SIZE_VIRTUAL_MEMORY;
-        }
-
-        @Override
-        public final boolean isSystemCheck() {
-            return true;
         }
 
     }
@@ -422,7 +368,7 @@ final class BootstrapCheck {
         public String errorMessage() {
             return String.format(
                     Locale.ROOT,
-                    "max virtual memory areas vm.max_map_count [%d] likely too low, increase to at least [%d]",
+                    "max virtual memory areas vm.max_map_count [%d] is too low, increase to at least [%d]",
                     getMaxMapCount(),
                     limit);
         }
@@ -433,7 +379,7 @@ final class BootstrapCheck {
         }
 
         // visible for testing
-        long getMaxMapCount(ESLogger logger) {
+        long getMaxMapCount(Logger logger) {
             final Path path = getProcSysVmMaxMapCountPath();
             try (final BufferedReader bufferedReader = getBufferedReader(path)) {
                 final String rawProcSysVmMaxMapCount = readProcSysVmMaxMapCount(bufferedReader);
@@ -441,11 +387,15 @@ final class BootstrapCheck {
                     try {
                         return parseProcSysVmMaxMapCount(rawProcSysVmMaxMapCount);
                     } catch (final NumberFormatException e) {
-                        logger.warn("unable to parse vm.max_map_count [{}]", e, rawProcSysVmMaxMapCount);
+                        logger.warn(
+                            (Supplier<?>) () -> new ParameterizedMessage(
+                                "unable to parse vm.max_map_count [{}]",
+                                rawProcSysVmMaxMapCount),
+                            e);
                     }
                 }
             } catch (final IOException e) {
-                logger.warn("I/O exception while trying to read [{}]", e, path);
+                logger.warn((Supplier<?>) () -> new ParameterizedMessage("I/O exception while trying to read [{}]", path), e);
             }
             return -1;
         }
@@ -470,11 +420,6 @@ final class BootstrapCheck {
             return Long.parseLong(procSysVmMaxMapCount);
         }
 
-        @Override
-        public final boolean isSystemCheck() {
-            return true;
-        }
-
     }
 
     static class ClientJvmCheck implements BootstrapCheck.Check {
@@ -497,9 +442,187 @@ final class BootstrapCheck {
                     getVmName());
         }
 
+    }
+
+    /**
+     * Checks if the serial collector is in use. This collector is single-threaded and devastating
+     * for performance and should not be used for a server application like Elasticsearch.
+     */
+    static class UseSerialGCCheck implements BootstrapCheck.Check {
+
         @Override
-        public final boolean isSystemCheck() {
-            return false;
+        public boolean check() {
+            return getUseSerialGC().equals("true");
+        }
+
+        // visible for testing
+        String getUseSerialGC() {
+            return JvmInfo.jvmInfo().useSerialGC();
+        }
+
+        @Override
+        public String errorMessage() {
+            return String.format(
+                Locale.ROOT,
+                "JVM is using the serial collector but should not be for the best performance; " +
+                    "either it's the default for the VM [%s] or -XX:+UseSerialGC was explicitly specified",
+                JvmInfo.jvmInfo().getVmName());
+        }
+
+    }
+
+    /**
+     * Bootstrap check that if system call filters are enabled, then system call filters must have installed successfully.
+     */
+    static class SystemCallFilterCheck implements BootstrapCheck.Check {
+
+        private final boolean areSystemCallFiltersEnabled;
+
+        SystemCallFilterCheck(final boolean areSystemCallFiltersEnabled) {
+            this.areSystemCallFiltersEnabled = areSystemCallFiltersEnabled;
+        }
+
+        @Override
+        public boolean check() {
+            return areSystemCallFiltersEnabled && !isSeccompInstalled();
+        }
+
+        // visible for testing
+        boolean isSeccompInstalled() {
+            return Natives.isSeccompInstalled();
+        }
+
+        @Override
+        public String errorMessage() {
+            return "system call filters failed to install; " +
+                "check the logs and fix your configuration or disable system call filters at your own risk";
+        }
+
+    }
+
+    abstract static class MightForkCheck implements BootstrapCheck.Check {
+
+        @Override
+        public boolean check() {
+            return isSeccompInstalled() && mightFork();
+        }
+
+        // visible for testing
+        boolean isSeccompInstalled() {
+            return Natives.isSeccompInstalled();
+        }
+
+        // visible for testing
+        abstract boolean mightFork();
+
+        @Override
+        public final boolean alwaysEnforce() {
+            return true;
+        }
+
+    }
+
+    static class OnErrorCheck extends MightForkCheck {
+
+        @Override
+        boolean mightFork() {
+            final String onError = onError();
+            return onError != null && !onError.equals("");
+        }
+
+        // visible for testing
+        String onError() {
+            return JvmInfo.jvmInfo().onError();
+        }
+
+        @Override
+        public String errorMessage() {
+            return String.format(
+                Locale.ROOT,
+                "OnError [%s] requires forking but is prevented by system call filters ([%s=true]);" +
+                    " upgrade to at least Java 8u92 and use ExitOnOutOfMemoryError",
+                onError(),
+                BootstrapSettings.SECCOMP_SETTING.getKey());
+        }
+
+    }
+
+    static class OnOutOfMemoryErrorCheck extends MightForkCheck {
+
+        @Override
+        boolean mightFork() {
+            final String onOutOfMemoryError = onOutOfMemoryError();
+            return onOutOfMemoryError != null && !onOutOfMemoryError.equals("");
+        }
+
+        // visible for testing
+        String onOutOfMemoryError() {
+            return JvmInfo.jvmInfo().onOutOfMemoryError();
+        }
+
+        @Override
+        public String errorMessage() {
+            return String.format(
+                Locale.ROOT,
+                "OnOutOfMemoryError [%s] requires forking but is prevented by system call filters ([%s=true]);" +
+                    " upgrade to at least Java 8u92 and use ExitOnOutOfMemoryError",
+                onOutOfMemoryError(),
+                BootstrapSettings.SECCOMP_SETTING.getKey());
+        }
+
+    }
+
+    /**
+     * Bootstrap check for versions of HotSpot that are known to have issues that can lead to index corruption when G1GC is enabled.
+     */
+    static class G1GCCheck implements BootstrapCheck.Check {
+
+        @Override
+        public boolean check() {
+            if ("Oracle Corporation".equals(jvmVendor()) && isJava8() && isG1GCEnabled()) {
+                final String jvmVersion = jvmVersion();
+                // HotSpot versions on Java 8 match this regular expression; note that this changes with Java 9 after JEP-223
+                final Pattern pattern = Pattern.compile("(\\d+)\\.(\\d+)-b\\d+");
+                final Matcher matcher = pattern.matcher(jvmVersion);
+                final boolean matches = matcher.matches();
+                assert matches : jvmVersion;
+                final int major = Integer.parseInt(matcher.group(1));
+                final int update = Integer.parseInt(matcher.group(2));
+                // HotSpot versions for Java 8 have major version 25, the bad versions are all versions prior to update 40
+                return major == 25 && update < 40;
+            } else {
+                return false;
+            }
+        }
+
+        // visible for testing
+        String jvmVendor() {
+            return Constants.JVM_VENDOR;
+        }
+
+        // visible for testing
+        boolean isG1GCEnabled() {
+            assert "Oracle Corporation".equals(jvmVendor());
+            return JvmInfo.jvmInfo().useG1GC().equals("true");
+        }
+
+        // visible for testing
+        String jvmVersion() {
+            assert "Oracle Corporation".equals(jvmVendor());
+            return Constants.JVM_VERSION;
+        }
+
+        // visible for testing
+        boolean isJava8() {
+            assert "Oracle Corporation".equals(jvmVendor());
+            return JavaVersion.current().equals(JavaVersion.parse("1.8"));
+        }
+
+        @Override
+        public String errorMessage() {
+           return String.format(
+               Locale.ROOT,
+               "JVM version [%s] can cause data corruption when used with G1GC; upgrade to at least Java 8u40", jvmVersion());
         }
 
     }

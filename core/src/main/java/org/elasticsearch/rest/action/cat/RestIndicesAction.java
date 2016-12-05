@@ -27,9 +27,10 @@ import org.elasticsearch.action.admin.indices.stats.IndexStats;
 import org.elasticsearch.action.admin.indices.stats.IndicesStatsRequest;
 import org.elasticsearch.action.admin.indices.stats.IndicesStatsResponse;
 import org.elasticsearch.action.support.IndicesOptions;
-import org.elasticsearch.client.Client;
 import org.elasticsearch.client.Requests;
+import org.elasticsearch.client.node.NodeClient;
 import org.elasticsearch.cluster.ClusterState;
+import org.elasticsearch.cluster.health.ClusterHealthStatus;
 import org.elasticsearch.cluster.health.ClusterIndexHealth;
 import org.elasticsearch.cluster.metadata.IndexMetaData;
 import org.elasticsearch.cluster.metadata.IndexNameExpressionResolver;
@@ -38,17 +39,20 @@ import org.elasticsearch.common.Strings;
 import org.elasticsearch.common.Table;
 import org.elasticsearch.common.inject.Inject;
 import org.elasticsearch.common.settings.Settings;
-import org.elasticsearch.rest.RestChannel;
+import org.elasticsearch.index.Index;
 import org.elasticsearch.rest.RestController;
 import org.elasticsearch.rest.RestRequest;
 import org.elasticsearch.rest.RestResponse;
-import org.elasticsearch.rest.action.support.RestActionListener;
-import org.elasticsearch.rest.action.support.RestResponseListener;
-import org.elasticsearch.rest.action.support.RestTable;
+import org.elasticsearch.rest.action.RestActionListener;
+import org.elasticsearch.rest.action.RestResponseListener;
 import org.joda.time.DateTime;
 import org.joda.time.DateTimeZone;
 
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashSet;
 import java.util.Locale;
+import java.util.Set;
 
 import static org.elasticsearch.rest.RestRequest.Method.GET;
 
@@ -57,8 +61,8 @@ public class RestIndicesAction extends AbstractCatAction {
     private final IndexNameExpressionResolver indexNameExpressionResolver;
 
     @Inject
-    public RestIndicesAction(Settings settings, RestController controller, Client client, IndexNameExpressionResolver indexNameExpressionResolver) {
-        super(settings, controller, client);
+    public RestIndicesAction(Settings settings, RestController controller, IndexNameExpressionResolver indexNameExpressionResolver) {
+        super(settings);
         this.indexNameExpressionResolver = indexNameExpressionResolver;
         controller.registerHandler(GET, "/_cat/indices", this);
         controller.registerHandler(GET, "/_cat/indices/{index}", this);
@@ -71,7 +75,7 @@ public class RestIndicesAction extends AbstractCatAction {
     }
 
     @Override
-    public void doRequest(final RestRequest request, final RestChannel channel, final Client client) {
+    public RestChannelConsumer doCatRequest(final RestRequest request, final NodeClient client) {
         final String[] indices = Strings.splitStringByCommaToArray(request.param("index"));
         final ClusterStateRequest clusterStateRequest = new ClusterStateRequest();
         clusterStateRequest.clear().indices(indices).metaData(true);
@@ -80,11 +84,11 @@ public class RestIndicesAction extends AbstractCatAction {
         final IndicesOptions strictExpandIndicesOptions = IndicesOptions.strictExpand();
         clusterStateRequest.indicesOptions(strictExpandIndicesOptions);
 
-        client.admin().cluster().state(clusterStateRequest, new RestActionListener<ClusterStateResponse>(channel) {
+        return channel -> client.admin().cluster().state(clusterStateRequest, new RestActionListener<ClusterStateResponse>(channel) {
             @Override
             public void processResponse(final ClusterStateResponse clusterStateResponse) {
                 final ClusterState state = clusterStateResponse.getState();
-                final String[] concreteIndices = indexNameExpressionResolver.concreteIndexNames(state, strictExpandIndicesOptions, indices);
+                final Index[] concreteIndices = indexNameExpressionResolver.concreteIndices(state, strictExpandIndicesOptions, indices);
                 // concreteIndices should contain exactly the indices in state.metaData() that were selected by clusterStateRequest using
                 // IndicesOptions.strictExpand(). We select the indices again here so that they can be displayed in the resulting table
                 // in the requesting order.
@@ -122,6 +126,19 @@ public class RestIndicesAction extends AbstractCatAction {
         });
     }
 
+    private static final Set<String> RESPONSE_PARAMS;
+
+    static {
+        final Set<String> responseParams = new HashSet<>(Arrays.asList("local", "health"));
+        responseParams.addAll(AbstractCatAction.RESPONSE_PARAMS);
+        RESPONSE_PARAMS = Collections.unmodifiableSet(responseParams);
+    }
+
+    @Override
+    protected Set<String> responseParams() {
+        return RESPONSE_PARAMS;
+    }
+
     @Override
     protected Table getTableWithHeader(final RestRequest request) {
         Table table = new Table();
@@ -129,6 +146,7 @@ public class RestIndicesAction extends AbstractCatAction {
         table.addCell("health", "alias:h;desc:current health status");
         table.addCell("status", "alias:s;desc:open/close status");
         table.addCell("index", "alias:i,idx;desc:index name");
+        table.addCell("uuid", "alias:id,uuid;desc:index uuid");
         table.addCell("pri", "alias:p,shards.primary,shardsPrimary;text-align:right;desc:number of primary shards");
         table.addCell("rep", "alias:r,shards.replica,shardsReplica;text-align:right;desc:number of replica shards");
         table.addCell("docs.count", "alias:dc,docsCount;text-align:right;desc:available docs");
@@ -281,9 +299,6 @@ public class RestIndicesAction extends AbstractCatAction {
         table.addCell("segments.index_writer_memory", "sibling:pri;alias:siwm,segmentsIndexWriterMemory;default:false;text-align:right;desc:memory used by index writer");
         table.addCell("pri.segments.index_writer_memory", "default:false;text-align:right;desc:memory used by index writer");
 
-        table.addCell("segments.index_writer_max_memory", "sibling:pri;alias:siwmx,segmentsIndexWriterMaxMemory;default:false;text-align:right;desc:maximum memory index writer may use before it must write buffered documents to a new segment");
-        table.addCell("pri.segments.index_writer_max_memory", "default:false;text-align:right;desc:maximum memory index writer may use before it must write buffered documents to a new segment");
-
         table.addCell("segments.version_map_memory", "sibling:pri;alias:svmm,segmentsVersionMapMemory;default:false;text-align:right;desc:memory used by version map");
         table.addCell("pri.segments.version_map_memory", "default:false;text-align:right;desc:memory used by version map");
 
@@ -315,19 +330,38 @@ public class RestIndicesAction extends AbstractCatAction {
         return table;
     }
 
-    private Table buildTable(RestRequest request, String[] indices, ClusterHealthResponse health, IndicesStatsResponse stats, MetaData indexMetaDatas) {
+    // package private for testing
+    Table buildTable(RestRequest request, Index[] indices, ClusterHealthResponse response, IndicesStatsResponse stats, MetaData indexMetaDatas) {
+        final String healthParam = request.param("health");
+        final ClusterHealthStatus status;
+        if (healthParam != null) {
+            status = ClusterHealthStatus.fromString(healthParam);
+        } else {
+            status = null;
+        }
+
         Table table = getTableWithHeader(request);
 
-        for (String index : indices) {
-            ClusterIndexHealth indexHealth = health.getIndices().get(index);
-            IndexStats indexStats = stats.getIndices().get(index);
-            IndexMetaData indexMetaData = indexMetaDatas.getIndices().get(index);
+        for (final Index index : indices) {
+            final String indexName = index.getName();
+            ClusterIndexHealth indexHealth = response.getIndices().get(indexName);
+            IndexStats indexStats = stats.getIndices().get(indexName);
+            IndexMetaData indexMetaData = indexMetaDatas.getIndices().get(indexName);
             IndexMetaData.State state = indexMetaData.getState();
+
+            if (status != null) {
+                if (state == IndexMetaData.State.CLOSE ||
+                        (indexHealth == null && !ClusterHealthStatus.RED.equals(status)) ||
+                        !indexHealth.getStatus().equals(status)) {
+                    continue;
+                }
+            }
 
             table.startRow();
             table.addCell(state == IndexMetaData.State.OPEN ? (indexHealth == null ? "red*" : indexHealth.getStatus().toString().toLowerCase(Locale.ROOT)) : null);
             table.addCell(state.toString().toLowerCase(Locale.ROOT));
-            table.addCell(index);
+            table.addCell(indexName);
+            table.addCell(index.getUUID());
             table.addCell(indexHealth == null ? null : indexHealth.getNumberOfShards());
             table.addCell(indexHealth == null ? null : indexHealth.getNumberOfReplicas());
             table.addCell(indexStats == null ? null : indexStats.getPrimaries().getDocs().getCount());
@@ -415,13 +449,13 @@ public class RestIndicesAction extends AbstractCatAction {
             table.addCell(indexStats == null ? null : indexStats.getPrimaries().getIndexing().getTotal().getIndexFailedCount());
 
             table.addCell(indexStats == null ? null : indexStats.getTotal().getMerge().getCurrent());
-            table.addCell(indexStats == null ? null : indexStats.getPrimaries().getMerge().getCurrentSize());
+            table.addCell(indexStats == null ? null : indexStats.getPrimaries().getMerge().getCurrent());
 
             table.addCell(indexStats == null ? null : indexStats.getTotal().getMerge().getCurrentNumDocs());
             table.addCell(indexStats == null ? null : indexStats.getPrimaries().getMerge().getCurrentNumDocs());
 
             table.addCell(indexStats == null ? null : indexStats.getTotal().getMerge().getCurrentSize());
-            table.addCell(indexStats == null ? null : indexStats.getPrimaries().getMerge().getCurrent());
+            table.addCell(indexStats == null ? null : indexStats.getPrimaries().getMerge().getCurrentSize());
 
             table.addCell(indexStats == null ? null : indexStats.getTotal().getMerge().getTotal());
             table.addCell(indexStats == null ? null : indexStats.getPrimaries().getMerge().getTotal());
@@ -479,9 +513,6 @@ public class RestIndicesAction extends AbstractCatAction {
 
             table.addCell(indexStats == null ? null : indexStats.getTotal().getSegments().getIndexWriterMemory());
             table.addCell(indexStats == null ? null : indexStats.getPrimaries().getSegments().getIndexWriterMemory());
-
-            table.addCell(indexStats == null ? null : indexStats.getTotal().getSegments().getIndexWriterMaxMemory());
-            table.addCell(indexStats == null ? null : indexStats.getPrimaries().getSegments().getIndexWriterMaxMemory());
 
             table.addCell(indexStats == null ? null : indexStats.getTotal().getSegments().getVersionMapMemory());
             table.addCell(indexStats == null ? null : indexStats.getPrimaries().getSegments().getVersionMapMemory());

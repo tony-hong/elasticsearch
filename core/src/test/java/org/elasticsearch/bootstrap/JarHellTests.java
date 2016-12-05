@@ -111,18 +111,6 @@ public class JarHellTests extends ESTestCase {
         }
     }
 
-    public void testLog4jLeniency() throws Exception {
-        Path dir = createTempDir();
-        URL[] jars = {makeJar(dir, "foo.jar", null, "org/apache/log4j/DuplicateClass.class"), makeJar(dir, "bar.jar", null, "org/apache/log4j/DuplicateClass.class")};
-        JarHell.checkJarHell(jars);
-    }
-
-    public void testBaseDateTimeLeniency() throws Exception {
-        Path dir = createTempDir();
-        URL[] jars = {makeJar(dir, "foo.jar", null, "org/joda/time/base/BaseDateTime.class"), makeJar(dir, "bar.jar", null, "org/joda/time/base/BaseDateTime.class")};
-        JarHell.checkJarHell(jars);
-    }
-
     public void testWithinSingleJar() throws Exception {
         // the java api for zip file does not allow creating duplicate entries (good!) so
         // this bogus jar had to be constructed with ant
@@ -180,6 +168,17 @@ public class JarHellTests extends ESTestCase {
         } catch (IllegalStateException e) {
             assertTrue(e.getMessage().equals("version string must be a sequence of nonnegative decimal integers separated by \".\"'s and may have leading zeros but was bogus"));
         }
+    }
+
+    public void testRequiredJDKVersionIsOK() throws Exception {
+        Path dir = createTempDir();
+        Manifest manifest = new Manifest();
+        Attributes attributes = manifest.getMainAttributes();
+        attributes.put(Attributes.Name.MANIFEST_VERSION, "1.0.0");
+        attributes.put(new Attributes.Name("X-Compile-Target-JDK"), "1.7");
+        URL[] jars = {makeJar(dir, "foo.jar", manifest, "Foo.class")};
+
+        JarHell.checkJarHell(jars);
     }
 
     /** make sure if a plugin is compiled against the same ES version, it works */

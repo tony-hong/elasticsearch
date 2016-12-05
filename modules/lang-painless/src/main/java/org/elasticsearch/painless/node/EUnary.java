@@ -20,49 +20,63 @@
 package org.elasticsearch.painless.node;
 
 import org.elasticsearch.painless.Definition;
+import org.elasticsearch.painless.Globals;
+import org.elasticsearch.painless.Location;
 import org.elasticsearch.painless.Definition.Sort;
 import org.elasticsearch.painless.Definition.Type;
 import org.elasticsearch.painless.AnalyzerCaster;
+import org.elasticsearch.painless.DefBootstrap;
 import org.elasticsearch.painless.Operation;
-import org.elasticsearch.painless.Variables;
+import org.elasticsearch.painless.Locals;
 import org.objectweb.asm.Label;
-import org.elasticsearch.painless.MethodWriter;
 
-import static org.elasticsearch.painless.WriterConstants.DEF_NEG_CALL;
-import static org.elasticsearch.painless.WriterConstants.DEF_NOT_CALL;
-import static org.elasticsearch.painless.WriterConstants.DEF_UTIL_TYPE;
+import java.util.Objects;
+import java.util.Set;
+
+import org.elasticsearch.painless.MethodWriter;
+import org.objectweb.asm.Opcodes;
 
 /**
  * Represents a unary math expression.
  */
 public final class EUnary extends AExpression {
 
-    final Operation operation;
-    AExpression child;
+    private final Operation operation;
+    private AExpression child;
 
-    public EUnary(int line, int offset, String location, Operation operation, AExpression child) {
-        super(line, offset, location);
+    private Type promote;
+    private boolean originallyExplicit = false; // record whether there was originally an explicit cast
 
-        this.operation = operation;
-        this.child = child;
+    public EUnary(Location location, Operation operation, AExpression child) {
+        super(location);
+
+        this.operation = Objects.requireNonNull(operation);
+        this.child = Objects.requireNonNull(child);
     }
 
     @Override
-    void analyze(Variables variables) {
+    void extractVariables(Set<String> variables) {
+        child.extractVariables(variables);
+    }
+
+    @Override
+    void analyze(Locals locals) {
+        originallyExplicit = explicit;
+
         if (operation == Operation.NOT) {
-            analyzeNot(variables);
+            analyzeNot(locals);
         } else if (operation == Operation.BWNOT) {
-            analyzeBWNot(variables);
+            analyzeBWNot(locals);
         } else if (operation == Operation.ADD) {
-            analyzerAdd(variables);
+            analyzerAdd(locals);
         } else if (operation == Operation.SUB) {
-            analyzerSub(variables);
+            analyzerSub(locals);
         } else {
-            throw new IllegalStateException(error("Illegal tree structure."));
+            throw createError(new IllegalStateException("Illegal tree structure."));
         }
     }
 
-    void analyzeNot(Variables variables) {
+    void analyzeNot(Locals variables) {
         child.expected = Definition.BOOLEAN_TYPE;
         child.analyze(variables);
         child = child.cast(variables);
@@ -74,13 +88,13 @@ public final class EUnary extends AExpression {
         actual = Definition.BOOLEAN_TYPE;
     }
 
-    void analyzeBWNot(Variables variables) {
+    void analyzeBWNot(Locals variables) {
         child.analyze(variables);
 
-        Type promote = AnalyzerCaster.promoteNumeric(child.actual, false);
+        promote = AnalyzerCaster.promoteNumeric(child.actual, false);
 
         if (promote == null) {
-            throw new ClassCastException(error("Cannot apply not [~] to type [" + child.actual.name + "]."));
+            throw createError(new ClassCastException("Cannot apply not [~] to type [" + child.actual.name + "]."));
         }
 
         child.expected = promote;
@@ -94,20 +108,24 @@ public final class EUnary extends AExpression {
             } else if (sort == Sort.LONG) {
                 constant = ~(long)child.constant;
             } else {
-                throw new IllegalStateException(error("Illegal tree structure."));
+                throw createError(new IllegalStateException("Illegal tree structure."));
             }
         }
 
-        actual = promote;
+        if (promote.sort == Sort.DEF && expected != null) {
+            actual = expected;
+        } else {
+            actual = promote;
+        }
     }
 
-    void analyzerAdd(Variables variables) {
+    void analyzerAdd(Locals variables) {
         child.analyze(variables);
 
-        Type promote = AnalyzerCaster.promoteNumeric(child.actual, true);
+        promote = AnalyzerCaster.promoteNumeric(child.actual, true);
 
         if (promote == null) {
-            throw new ClassCastException(error("Cannot apply positive [+] to type [" + child.actual.name + "]."));
+            throw createError(new ClassCastException("Cannot apply positive [+] to type [" + child.actual.name + "]."));
         }
 
         child.expected = promote;
@@ -125,20 +143,24 @@ public final class EUnary extends AExpression {
             } else if (sort == Sort.DOUBLE) {
                 constant = +(double)child.constant;
             } else {
-                throw new IllegalStateException(error("Illegal tree structure."));
+                throw createError(new IllegalStateException("Illegal tree structure."));
             }
         }
 
-        actual = promote;
+        if (promote.sort == Sort.DEF && expected != null) {
+            actual = expected;
+        } else {
+            actual = promote;
+        }
     }
 
-    void analyzerSub(Variables variables) {
+    void analyzerSub(Locals variables) {
         child.analyze(variables);
 
-        Type promote = AnalyzerCaster.promoteNumeric(child.actual, true);
+        promote = AnalyzerCaster.promoteNumeric(child.actual, true);
 
         if (promote == null) {
-            throw new ClassCastException(error("Cannot apply negative [-] to type [" + child.actual.name + "]."));
+            throw createError(new ClassCastException("Cannot apply negative [-] to type [" + child.actual.name + "]."));
         }
 
         child.expected = promote;
@@ -156,64 +178,80 @@ public final class EUnary extends AExpression {
             } else if (sort == Sort.DOUBLE) {
                 constant = -(double)child.constant;
             } else {
-                throw new IllegalStateException(error("Illegal tree structure."));
+                throw createError(new IllegalStateException("Illegal tree structure."));
             }
         }
 
-        actual = promote;
+        if (promote.sort == Sort.DEF && expected != null) {
+            actual = expected;
+        } else {
+            actual = promote;
+        }
     }
 
     @Override
-    void write(MethodWriter writer) {
+    void write(MethodWriter writer, Globals globals) {
+        writer.writeDebugInfo(location);
+
         if (operation == Operation.NOT) {
-            if (tru == null && fals == null) {
-                Label localfals = new Label();
-                Label end = new Label();
+            Label fals = new Label();
+            Label end = new Label();
 
-                child.fals = localfals;
-                child.write(writer);
+            child.write(writer, globals);
+            writer.ifZCmp(Opcodes.IFEQ, fals);
 
-                writer.push(false);
-                writer.goTo(end);
-                writer.mark(localfals);
-                writer.push(true);
-                writer.mark(end);
-            } else {
-                child.tru = fals;
-                child.fals = tru;
-                child.write(writer);
-            }
+            writer.push(false);
+            writer.goTo(end);
+            writer.mark(fals);
+            writer.push(true);
+            writer.mark(end);
         } else {
-            org.objectweb.asm.Type type = actual.type;
-            Sort sort = actual.sort;
+            Sort sort = promote.sort;
+            child.write(writer, globals);
 
-            child.write(writer);
+            // Def calls adopt the wanted return value. If there was a narrowing cast,
+            // we need to flag that so that it's done at runtime.
+            int defFlags = 0;
+
+            if (originallyExplicit) {
+                defFlags |= DefBootstrap.OPERATOR_EXPLICIT_CAST;
+            }
 
             if (operation == Operation.BWNOT) {
                 if (sort == Sort.DEF) {
-                    writer.invokeStatic(DEF_UTIL_TYPE, DEF_NOT_CALL);
+                    org.objectweb.asm.Type descriptor = org.objectweb.asm.Type.getMethodType(actual.type, child.actual.type);
+                    writer.invokeDefCall("not", descriptor, DefBootstrap.UNARY_OPERATOR, defFlags);
                 } else {
                     if (sort == Sort.INT) {
                         writer.push(-1);
                     } else if (sort == Sort.LONG) {
                         writer.push(-1L);
                     } else {
-                        throw new IllegalStateException(error("Illegal tree structure."));
+                        throw createError(new IllegalStateException("Illegal tree structure."));
                     }
 
-                    writer.math(MethodWriter.XOR, type);
+                    writer.math(MethodWriter.XOR, actual.type);
                 }
             } else if (operation == Operation.SUB) {
                 if (sort == Sort.DEF) {
-                    writer.invokeStatic(DEF_UTIL_TYPE, DEF_NEG_CALL);
+                    org.objectweb.asm.Type descriptor = org.objectweb.asm.Type.getMethodType(actual.type, child.actual.type);
+                    writer.invokeDefCall("neg", descriptor, DefBootstrap.UNARY_OPERATOR, defFlags);
                 } else {
-                    writer.math(MethodWriter.NEG, type);
+                    writer.math(MethodWriter.NEG, actual.type);
                 }
-            } else if (operation != Operation.ADD) {
-                throw new IllegalStateException(error("Illegal tree structure."));
+            } else if (operation == Operation.ADD) {
+                if (sort == Sort.DEF) {
+                    org.objectweb.asm.Type descriptor = org.objectweb.asm.Type.getMethodType(actual.type, child.actual.type);
+                    writer.invokeDefCall("plus", descriptor, DefBootstrap.UNARY_OPERATOR, defFlags);
+                }
+            } else {
+                throw createError(new IllegalStateException("Illegal tree structure."));
             }
-
-            writer.writeBranch(tru, fals);
         }
+    }
+
+    @Override
+    public String toString() {
+        return singleLineToString(operation.symbol, child);
     }
 }

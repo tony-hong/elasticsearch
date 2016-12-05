@@ -43,7 +43,7 @@ public class NodeExplanation implements Writeable, ToXContent {
     private final String finalExplanation;
 
     public NodeExplanation(final DiscoveryNode node, final Decision nodeDecision, final Float nodeWeight,
-                           final @Nullable IndicesShardStoresResponse.StoreStatus storeStatus,
+                           @Nullable final IndicesShardStoresResponse.StoreStatus storeStatus,
                            final ClusterAllocationExplanation.FinalDecision finalDecision,
                            final String finalExplanation,
                            final ClusterAllocationExplanation.StoreCopy storeCopy) {
@@ -106,7 +106,7 @@ public class NodeExplanation implements Writeable, ToXContent {
             }
             builder.endObject(); // end store
             builder.field("final_decision", finalDecision.toString());
-            builder.field("final_explanation", finalExplanation.toString());
+            builder.field("final_explanation", finalExplanation);
             builder.field("weight", nodeWeight);
             nodeDecision.toXContent(builder, params);
         }

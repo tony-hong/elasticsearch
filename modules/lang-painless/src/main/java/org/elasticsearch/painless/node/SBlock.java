@@ -19,43 +19,57 @@
 
 package org.elasticsearch.painless.node;
 
-import org.elasticsearch.painless.Variables;
+import org.elasticsearch.painless.Globals;
+import org.elasticsearch.painless.Locals;
+import org.elasticsearch.painless.Location;
 import org.elasticsearch.painless.MethodWriter;
 
 import java.util.Collections;
 import java.util.List;
+import java.util.Set;
+
+import static java.util.Collections.emptyList;
 
 /**
  * Represents a set of statements as a branch of control-flow.
  */
 public final class SBlock extends AStatement {
 
-    final List<AStatement> statements;
+    private final List<AStatement> statements;
 
-    public SBlock(int line, int offset, String location, List<AStatement> statements) {
-        super(line, offset, location);
+    public SBlock(Location location, List<AStatement> statements) {
+        super(location);
 
         this.statements = Collections.unmodifiableList(statements);
     }
 
     @Override
-    void analyze(Variables variables) {
+    void extractVariables(Set<String> variables) {
+        for (AStatement statement : statements) {
+            statement.extractVariables(variables);
+        }
+    }
+
+    @Override
+    void analyze(Locals locals) {
         if (statements == null || statements.isEmpty()) {
-            throw new IllegalArgumentException(error("A block must contain at least one statement."));
+            throw createError(new IllegalArgumentException("A block must contain at least one statement."));
         }
 
-        final AStatement last = statements.get(statements.size() - 1);
+        AStatement last = statements.get(statements.size() - 1);
 
         for (AStatement statement : statements) {
+            // Note that we do not need to check after the last statement because
+            // there is no statement that can be unreachable after the last.
             if (allEscape) {
-                throw new IllegalArgumentException(error("Unreachable statement."));
+                throw createError(new IllegalArgumentException("Unreachable statement."));
             }
 
             statement.inLoop = inLoop;
             statement.lastSource = lastSource && statement == last;
             statement.lastLoop = (beginLoop || lastLoop) && statement == last;
 
-            statement.analyze(variables);
+            statement.analyze(locals);
 
             methodEscape = statement.methodEscape;
             loopEscape = statement.loopEscape;
@@ -67,11 +81,16 @@ public final class SBlock extends AStatement {
     }
 
     @Override
-    void write(MethodWriter writer) {
+    void write(MethodWriter writer, Globals globals) {
         for (AStatement statement : statements) {
             statement.continu = continu;
             statement.brake = brake;
-            statement.write(writer);
+            statement.write(writer, globals);
         }
+    }
+
+    @Override
+    public String toString() {
+        return multilineToString(emptyList(), statements);
     }
 }

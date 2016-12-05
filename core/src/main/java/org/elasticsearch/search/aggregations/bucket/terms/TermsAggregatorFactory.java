@@ -69,8 +69,8 @@ public class TermsAggregatorFactory extends ValuesSourceAggregatorFactory<Values
     @Override
     protected Aggregator createUnmapped(Aggregator parent, List<PipelineAggregator> pipelineAggregators, Map<String, Object> metaData)
             throws IOException {
-        final InternalAggregation aggregation = new UnmappedTerms(name, order, config.format(), bucketCountThresholds.getRequiredSize(),
-                bucketCountThresholds.getShardSize(), bucketCountThresholds.getMinDocCount(), pipelineAggregators, metaData);
+        final InternalAggregation aggregation = new UnmappedTerms(name, order, bucketCountThresholds.getRequiredSize(),
+                bucketCountThresholds.getMinDocCount(), pipelineAggregators, metaData);
         return new NonCollectingAggregator(name, context, parent, factories, pipelineAggregators, metaData) {
             {
                 // even in the case of an unmapped aggregator, validate the
@@ -131,7 +131,10 @@ public class TermsAggregatorFactory extends ValuesSourceAggregatorFactory<Values
                 // to be unbounded and most instances may only aggregate few
                 // documents, so use hashed based
                 // global ordinals to keep the bucket ords dense.
-                if (Aggregator.descendsFromBucketAggregator(parent)) {
+                // Additionally, if using partitioned terms the regular global 
+                // ordinals would be sparse so we opt for hash
+                if (Aggregator.descendsFromBucketAggregator(parent) ||
+                        (includeExclude != null && includeExclude.isPartitionBased())) {
                     execution = ExecutionMode.GLOBAL_ORDINALS_HASH;
                 } else {
                     if (factories == AggregatorFactories.EMPTY) {
@@ -150,14 +153,22 @@ public class TermsAggregatorFactory extends ValuesSourceAggregatorFactory<Values
                     }
                 }
             }
+            SubAggCollectionMode cm = collectMode;
+            if (cm == null) {
+                cm = SubAggCollectionMode.DEPTH_FIRST;
+                if (factories != AggregatorFactories.EMPTY) {
+                    cm = subAggCollectionMode(bucketCountThresholds.getShardSize(), maxOrd);
+                }
+            }
+
             DocValueFormat format = config.format();
             if ((includeExclude != null) && (includeExclude.isRegexBased()) && format != DocValueFormat.RAW) {
                 throw new AggregationExecutionException("Aggregation [" + name + "] cannot support regular expression style include/exclude "
                         + "settings as they can only be applied to string fields. Use an array of values for include/exclude clauses");
             }
 
-            return execution.create(name, factories, valuesSource, order, format, bucketCountThresholds, includeExclude, context, parent, 
-                    collectMode, showTermDocCountError, pipelineAggregators, metaData);
+            return execution.create(name, factories, valuesSource, order, format, bucketCountThresholds, includeExclude, context, parent,
+                    cm, showTermDocCountError, pipelineAggregators, metaData);
         }
 
         if ((includeExclude != null) && (includeExclude.isRegexBased())) {
@@ -167,24 +178,46 @@ public class TermsAggregatorFactory extends ValuesSourceAggregatorFactory<Values
 
         if (valuesSource instanceof ValuesSource.Numeric) {
             IncludeExclude.LongFilter longFilter = null;
+            SubAggCollectionMode cm = collectMode;
+            if (cm == null) {
+                if (factories != AggregatorFactories.EMPTY) {
+                    cm = subAggCollectionMode(bucketCountThresholds.getShardSize(), -1);
+                } else {
+                    cm = SubAggCollectionMode.DEPTH_FIRST;
+                }
+            }
             if (((ValuesSource.Numeric) valuesSource).isFloatingPoint()) {
                 if (includeExclude != null) {
                     longFilter = includeExclude.convertToDoubleFilter();
                 }
                 return new DoubleTermsAggregator(name, factories, (ValuesSource.Numeric) valuesSource, config.format(), order,
-                        bucketCountThresholds, context, parent, collectMode, showTermDocCountError, longFilter,
+                        bucketCountThresholds, context, parent, cm, showTermDocCountError, longFilter,
                         pipelineAggregators, metaData);
             }
             if (includeExclude != null) {
                 longFilter = includeExclude.convertToLongFilter(config.format());
             }
             return new LongTermsAggregator(name, factories, (ValuesSource.Numeric) valuesSource, config.format(), order,
-                    bucketCountThresholds, context, parent, collectMode, showTermDocCountError, longFilter, pipelineAggregators,
+                    bucketCountThresholds, context, parent, cm, showTermDocCountError, longFilter, pipelineAggregators,
                     metaData);
         }
 
         throw new AggregationExecutionException("terms aggregation cannot be applied to field [" + config.fieldContext().field()
                 + "]. It can only be applied to numeric or string fields.");
+    }
+
+    // return the SubAggCollectionMode that this aggregation should use based on the expected size
+    // and the cardinality of the field
+    static SubAggCollectionMode subAggCollectionMode(int expectedSize, long maxOrd) {
+        if (expectedSize == Integer.MAX_VALUE) {
+            // return all buckets
+            return SubAggCollectionMode.DEPTH_FIRST;
+        }
+        if (maxOrd == -1 || maxOrd > expectedSize) {
+            // use breadth_first if the cardinality is bigger than the expected size or unknown (-1)
+            return SubAggCollectionMode.BREADTH_FIRST;
+        }
+        return SubAggCollectionMode.DEPTH_FIRST;
     }
 
     public enum ExecutionMode {

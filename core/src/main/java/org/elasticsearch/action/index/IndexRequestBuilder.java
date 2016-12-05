@@ -19,11 +19,12 @@
 
 package org.elasticsearch.action.index;
 
+import org.elasticsearch.action.DocWriteRequest;
+import org.elasticsearch.action.support.WriteRequestBuilder;
 import org.elasticsearch.action.support.replication.ReplicationRequestBuilder;
 import org.elasticsearch.client.ElasticsearchClient;
 import org.elasticsearch.common.Nullable;
 import org.elasticsearch.common.bytes.BytesReference;
-import org.elasticsearch.common.unit.TimeValue;
 import org.elasticsearch.common.xcontent.XContentBuilder;
 import org.elasticsearch.common.xcontent.XContentType;
 import org.elasticsearch.index.VersionType;
@@ -33,7 +34,8 @@ import java.util.Map;
 /**
  * An index document action request builder.
  */
-public class IndexRequestBuilder extends ReplicationRequestBuilder<IndexRequest, IndexResponse, IndexRequestBuilder> {
+public class IndexRequestBuilder extends ReplicationRequestBuilder<IndexRequest, IndexResponse, IndexRequestBuilder>
+        implements WriteRequestBuilder<IndexRequestBuilder> {
 
     public IndexRequestBuilder(ElasticsearchClient client, IndexAction action) {
         super(client, action, new IndexRequest());
@@ -198,17 +200,8 @@ public class IndexRequestBuilder extends ReplicationRequestBuilder<IndexRequest,
     /**
      * Sets the type of operation to perform.
      */
-    public IndexRequestBuilder setOpType(IndexRequest.OpType opType) {
+    public IndexRequestBuilder setOpType(DocWriteRequest.OpType opType) {
         request.opType(opType);
-        return this;
-    }
-
-    /**
-     * Sets a string representation of the {@link #setOpType(org.elasticsearch.action.index.IndexRequest.OpType)}. Can
-     * be either "index" or "create".
-     */
-    public IndexRequestBuilder setOpType(String opType) {
-        request.opType(IndexRequest.OpType.fromString(opType));
         return this;
     }
 
@@ -217,16 +210,6 @@ public class IndexRequestBuilder extends ReplicationRequestBuilder<IndexRequest,
      */
     public IndexRequestBuilder setCreate(boolean create) {
         request.create(create);
-        return this;
-    }
-
-    /**
-     * Should a refresh be executed post this index operation causing the operation to
-     * be searchable. Note, heavy indexing should not set this to <tt>true</tt>. Defaults
-     * to <tt>false</tt>.
-     */
-    public IndexRequestBuilder setRefresh(boolean refresh) {
-        request.refresh(refresh);
         return this;
     }
 
@@ -244,38 +227,6 @@ public class IndexRequestBuilder extends ReplicationRequestBuilder<IndexRequest,
      */
     public IndexRequestBuilder setVersionType(VersionType versionType) {
         request.versionType(versionType);
-        return this;
-    }
-
-    /**
-     * Sets the timestamp either as millis since the epoch, or, in the configured date format.
-     */
-    public IndexRequestBuilder setTimestamp(String timestamp) {
-        request.timestamp(timestamp);
-        return this;
-    }
-
-    /**
-     * Sets the ttl value as a time value expression.
-     */
-    public IndexRequestBuilder setTTL(String ttl) {
-        request.ttl(ttl);
-        return this;
-    }
-
-    /**
-     * Sets the relative ttl value in milliseconds. It musts be greater than 0 as it makes little sense otherwise.
-     */
-    public IndexRequestBuilder setTTL(long ttl) {
-        request.ttl(ttl);
-        return this;
-    }
-
-    /**
-     * Sets the ttl as a {@link TimeValue} instance.
-     */
-    public IndexRequestBuilder setTTL(TimeValue ttl) {
-        request.ttl(ttl);
         return this;
     }
 

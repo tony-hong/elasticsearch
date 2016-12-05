@@ -20,55 +20,70 @@
 package org.elasticsearch.painless.node;
 
 import org.elasticsearch.painless.Definition;
+import org.elasticsearch.painless.Globals;
+import org.elasticsearch.painless.Location;
 import org.elasticsearch.painless.Definition.Sort;
-import org.elasticsearch.painless.Variables;
+
+import java.util.Objects;
+import java.util.Set;
+
+import org.elasticsearch.painless.Locals;
 import org.elasticsearch.painless.MethodWriter;
 
 /**
- * Respresents a non-decimal numeric constant.
+ * Represents a non-decimal numeric constant.
  */
 public final class ENumeric extends AExpression {
 
-    final String value;
-    int radix;
+    private final String value;
+    private int radix;
 
-    public ENumeric(int line, int offset, String location, String value, int radix) {
-        super(line, offset, location);
+    public ENumeric(Location location, String value, int radix) {
+        super(location);
 
-        this.value = value;
+        this.value = Objects.requireNonNull(value);
         this.radix = radix;
     }
 
     @Override
-    void analyze(Variables variables) {
+    void extractVariables(Set<String> variables) {
+        // Do nothing.
+    }
+
+    @Override
+    void analyze(Locals locals) {
+        if (!read) {
+            throw createError(new IllegalArgumentException("Must read from constant [" + value + "]."));
+        }
+
         if (value.endsWith("d") || value.endsWith("D")) {
             if (radix != 10) {
-                throw new IllegalStateException(error("Invalid tree structure."));
+                throw createError(new IllegalStateException("Illegal tree structure."));
             }
 
             try {
                 constant = Double.parseDouble(value.substring(0, value.length() - 1));
                 actual = Definition.DOUBLE_TYPE;
             } catch (NumberFormatException exception) {
-                throw new IllegalArgumentException(error("Invalid double constant [" + value + "]."));
+                throw createError(new IllegalArgumentException("Invalid double constant [" + value + "]."));
             }
         } else if (value.endsWith("f") || value.endsWith("F")) {
             if (radix != 10) {
-                throw new IllegalStateException(error("Invalid tree structure."));
+                throw createError(new IllegalStateException("Illegal tree structure."));
             }
 
             try {
                 constant = Float.parseFloat(value.substring(0, value.length() - 1));
                 actual = Definition.FLOAT_TYPE;
             } catch (NumberFormatException exception) {
-                throw new IllegalArgumentException(error("Invalid float constant [" + value + "]."));
+                throw createError(new IllegalArgumentException("Invalid float constant [" + value + "]."));
             }
         } else if (value.endsWith("l") || value.endsWith("L")) {
             try {
                 constant = Long.parseLong(value.substring(0, value.length() - 1), radix);
                 actual = Definition.LONG_TYPE;
             } catch (NumberFormatException exception) {
-                throw new IllegalArgumentException(error("Invalid long constant [" + value + "]."));
+                throw createError(new IllegalArgumentException("Invalid long constant [" + value + "]."));
             }
         } else {
             try {
@@ -89,13 +104,29 @@ public final class ENumeric extends AExpression {
                     actual = Definition.INT_TYPE;
                 }
             } catch (NumberFormatException exception) {
-                throw new IllegalArgumentException(error("Invalid int constant [" + value + "]."));
+                try {
+                    // Check if we can parse as a long. If so then hint that the user might prefer that.
+                    Long.parseLong(value, radix);
+                    throw createError(new IllegalArgumentException("Invalid int constant [" + value + "]. If you want a long constant "
+                            + "then change it to [" + value + "L]."));
+                } catch (NumberFormatException longNoGood) {
+                    // Ignored
+                }
+                throw createError(new IllegalArgumentException("Invalid int constant [" + value + "]."));
             }
         }
     }
 
     @Override
-    void write(MethodWriter writer) {
-        throw new IllegalArgumentException(error("Illegal tree structure."));
+    void write(MethodWriter writer, Globals globals) {
+        throw createError(new IllegalStateException("Illegal tree structure."));
+    }
+
+    @Override
+    public String toString() {
+        if (radix != 10) {
+            return singleLineToString(value, radix);
+        }
+        return singleLineToString(value);
     }
 }

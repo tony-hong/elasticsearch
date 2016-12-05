@@ -18,96 +18,147 @@
  */
 package org.elasticsearch.action.support.replication;
 
+import org.apache.logging.log4j.Logger;
+import org.apache.logging.log4j.message.ParameterizedMessage;
 import org.elasticsearch.ElasticsearchException;
 import org.elasticsearch.ExceptionsHelper;
 import org.elasticsearch.action.ActionListener;
-import org.elasticsearch.action.ReplicationResponse;
 import org.elasticsearch.action.UnavailableShardsException;
-import org.elasticsearch.action.WriteConsistencyLevel;
+import org.elasticsearch.action.support.ActiveShardCount;
 import org.elasticsearch.action.support.TransportActions;
 import org.elasticsearch.cluster.ClusterState;
+import org.elasticsearch.cluster.metadata.IndexMetaData;
+import org.elasticsearch.cluster.routing.AllocationId;
 import org.elasticsearch.cluster.routing.IndexRoutingTable;
 import org.elasticsearch.cluster.routing.IndexShardRoutingTable;
 import org.elasticsearch.cluster.routing.ShardRouting;
-import org.elasticsearch.common.collect.Tuple;
+import org.elasticsearch.common.Nullable;
 import org.elasticsearch.common.io.stream.StreamInput;
-import org.elasticsearch.common.logging.ESLogger;
+import org.elasticsearch.common.util.set.Sets;
 import org.elasticsearch.index.engine.VersionConflictEngineException;
 import org.elasticsearch.index.shard.ShardId;
 import org.elasticsearch.rest.RestStatus;
-import org.elasticsearch.transport.TransportResponse;
 
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
+import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
+import java.util.stream.Collectors;
 
-public class ReplicationOperation<Request extends ReplicationRequest<Request>, ReplicaRequest extends ReplicationRequest<ReplicaRequest>,
-    Response extends ReplicationResponse> {
-    final private ESLogger logger;
-    final private Request request;
-    final private Supplier<ClusterState> clusterStateSupplier;
-    final private String opType;
-    final private AtomicInteger totalShards = new AtomicInteger();
-    final private AtomicInteger pendingShards = new AtomicInteger();
-    final private AtomicInteger successfulShards = new AtomicInteger();
-    final private boolean executeOnReplicas;
-    final private boolean checkWriteConsistency;
-    final private Primary<Request, ReplicaRequest, Response> primary;
-    final private Replicas<ReplicaRequest> replicasProxy;
-    final private AtomicBoolean finished = new AtomicBoolean();
-    final protected ActionListener<Response> finalResponseListener;
+public class ReplicationOperation<
+            Request extends ReplicationRequest<Request>,
+            ReplicaRequest extends ReplicationRequest<ReplicaRequest>,
+            PrimaryResultT extends ReplicationOperation.PrimaryResult<ReplicaRequest>
+        > {
+    private final Logger logger;
+    private final Request request;
+    private final Supplier<ClusterState> clusterStateSupplier;
+    private final String opType;
+    private final AtomicInteger totalShards = new AtomicInteger();
+    /**
+     * The number of pending sub-operations in this operation. This is incremented when the following operations start and decremented when
+     * they complete:
+     * <ul>
+     * <li>The operation on the primary</li>
+     * <li>The operation on each replica</li>
+     * <li>Coordination of the operation as a whole. This prevents the operation from terminating early if we haven't started any replica
+     * operations and the primary finishes.</li>
+     * </ul>
+     */
+    private final AtomicInteger pendingActions = new AtomicInteger();
+    private final AtomicInteger successfulShards = new AtomicInteger();
+    private final boolean executeOnReplicas;
+    private final Primary<Request, ReplicaRequest, PrimaryResultT> primary;
+    private final Replicas<ReplicaRequest> replicasProxy;
+    private final AtomicBoolean finished = new AtomicBoolean();
+    protected final ActionListener<PrimaryResultT> resultListener;
 
-    private volatile Response finalResponse = null;
+    private volatile PrimaryResultT primaryResult = null;
 
     private final List<ReplicationResponse.ShardInfo.Failure> shardReplicaFailures = Collections.synchronizedList(new ArrayList<>());
 
-    ReplicationOperation(Request request, Primary<Request, ReplicaRequest, Response> primary,
-                         ActionListener<Response> listener,
-                         boolean executeOnReplicas, boolean checkWriteConsistency,
-                         Replicas<ReplicaRequest> replicas,
-                         Supplier<ClusterState> clusterStateSupplier, ESLogger logger, String opType) {
-        this.checkWriteConsistency = checkWriteConsistency;
+    public ReplicationOperation(Request request, Primary<Request, ReplicaRequest, PrimaryResultT> primary,
+                                ActionListener<PrimaryResultT> listener,
+                                boolean executeOnReplicas, Replicas<ReplicaRequest> replicas,
+                                Supplier<ClusterState> clusterStateSupplier, Logger logger, String opType) {
         this.executeOnReplicas = executeOnReplicas;
         this.replicasProxy = replicas;
         this.primary = primary;
-        this.finalResponseListener = listener;
+        this.resultListener = listener;
         this.logger = logger;
         this.request = request;
         this.clusterStateSupplier = clusterStateSupplier;
         this.opType = opType;
     }
 
-    void execute() throws Exception {
-        final String writeConsistencyFailure = checkWriteConsistency ? checkWriteConsistency() : null;
-        final ShardId shardId = primary.routingEntry().shardId();
-        if (writeConsistencyFailure != null) {
-            finishAsFailed(new UnavailableShardsException(shardId,
-                "{} Timeout: [{}], request: [{}]", writeConsistencyFailure, request.timeout(), request));
+    public void execute() throws Exception {
+        final String activeShardCountFailure = checkActiveShardCount();
+        final ShardRouting primaryRouting = primary.routingEntry();
+        final ShardId primaryId = primaryRouting.shardId();
+        if (activeShardCountFailure != null) {
+            finishAsFailed(new UnavailableShardsException(primaryId,
+                "{} Timeout: [{}], request: [{}]", activeShardCountFailure, request.timeout(), request));
             return;
         }
 
         totalShards.incrementAndGet();
-        pendingShards.incrementAndGet(); // increase by 1 until we finish all primary coordination
-        Tuple<Response, ReplicaRequest> primaryResponse = primary.perform(request);
-        successfulShards.incrementAndGet(); // mark primary as successful
-        finalResponse = primaryResponse.v1();
-        ReplicaRequest replicaRequest = primaryResponse.v2();
-        assert replicaRequest.primaryTerm() > 0 : "replicaRequest doesn't have a primary term";
-        if (logger.isTraceEnabled()) {
-            logger.trace("[{}] op [{}] completed on primary for request [{}]", shardId, opType, request);
+        pendingActions.incrementAndGet(); // increase by 1 until we finish all primary coordination
+        primaryResult = primary.perform(request);
+        primary.updateLocalCheckpointForShard(primaryRouting.allocationId().getId(), primary.localCheckpoint());
+        final ReplicaRequest replicaRequest = primaryResult.replicaRequest();
+        if (replicaRequest != null) {
+            assert replicaRequest.primaryTerm() > 0 : "replicaRequest doesn't have a primary term";
+            if (logger.isTraceEnabled()) {
+                logger.trace("[{}] op [{}] completed on primary for request [{}]", primaryId, opType, request);
+            }
+
+            // we have to get a new state after successfully indexing into the primary in order to honour recovery semantics.
+            // we have to make sure that every operation indexed into the primary after recovery start will also be replicated
+            // to the recovery target. If we use an old cluster state, we may miss a relocation that has started since then.
+            ClusterState clusterState = clusterStateSupplier.get();
+            final List<ShardRouting> shards = getShards(primaryId, clusterState);
+            Set<String> inSyncAllocationIds = getInSyncAllocationIds(primaryId, clusterState);
+
+            markUnavailableShardsAsStale(replicaRequest, inSyncAllocationIds, shards);
+
+            performOnReplicas(replicaRequest, shards);
         }
-        // we have to get a new state after successfully indexing into the primary in order to honour recovery semantics.
-        // we have to make sure that every operation indexed into the primary after recovery start will also be replicated
-        // to the recovery target. If we use an old cluster state, we may miss a relocation that has started since then.
-        // If the index gets deleted after primary operation, we skip replication
-        List<ShardRouting> shards = getShards(shardId, clusterStateSupplier.get());
+
+        successfulShards.incrementAndGet();  // mark primary as successful
+        decPendingAndFinishIfNeeded();
+    }
+
+    private void markUnavailableShardsAsStale(ReplicaRequest replicaRequest, Set<String> inSyncAllocationIds, List<ShardRouting> shards) {
+        if (inSyncAllocationIds.isEmpty() == false && shards.isEmpty() == false) {
+            Set<String> availableAllocationIds = shards.stream()
+                .map(ShardRouting::allocationId)
+                .filter(Objects::nonNull)
+                .map(AllocationId::getId)
+                .collect(Collectors.toSet());
+
+            // if inSyncAllocationIds contains allocation ids of shards that don't exist in RoutingTable, mark copies as stale
+            for (String allocationId : Sets.difference(inSyncAllocationIds, availableAllocationIds)) {
+                // mark copy as stale
+                pendingActions.incrementAndGet();
+                replicasProxy.markShardCopyAsStale(replicaRequest.shardId(), allocationId, replicaRequest.primaryTerm(),
+                    ReplicationOperation.this::decPendingAndFinishIfNeeded,
+                    ReplicationOperation.this::onPrimaryDemoted,
+                    throwable -> decPendingAndFinishIfNeeded()
+                );
+            }
+        }
+    }
+
+    private void performOnReplicas(ReplicaRequest replicaRequest, List<ShardRouting> shards) {
         final String localNodeId = primary.routingEntry().currentNodeId();
+        // If the index gets deleted after primary operation, we skip replication
         for (final ShardRouting shard : shards) {
             if (executeOnReplicas == false || shard.unassigned()) {
                 if (shard.primary() == false) {
@@ -121,12 +172,9 @@ public class ReplicationOperation<Request extends ReplicationRequest<Request>, R
             }
 
             if (shard.relocating() && shard.relocatingNodeId().equals(localNodeId) == false) {
-                performOnReplica(shard.buildTargetRelocatingShard(), replicaRequest);
+                performOnReplica(shard.getTargetRelocatingShard(), replicaRequest);
             }
         }
-
-        // decrement pending and finish (if there are no replicas, or those are done)
-        decPendingAndFinishIfNeeded(); // incremented in the beginning of this method
     }
 
     private void performOnReplica(final ShardRouting shard, final ReplicaRequest replicaRequest) {
@@ -135,18 +183,25 @@ public class ReplicationOperation<Request extends ReplicationRequest<Request>, R
         }
 
         totalShards.incrementAndGet();
-        pendingShards.incrementAndGet();
-        replicasProxy.performOn(shard, replicaRequest, new ActionListener<TransportResponse.Empty>() {
+        pendingActions.incrementAndGet();
+        replicasProxy.performOn(shard, replicaRequest, new ActionListener<ReplicaResponse>() {
             @Override
-            public void onResponse(TransportResponse.Empty empty) {
+            public void onResponse(ReplicaResponse response) {
                 successfulShards.incrementAndGet();
+                primary.updateLocalCheckpointForShard(response.allocationId(), response.localCheckpoint());
                 decPendingAndFinishIfNeeded();
             }
 
             @Override
-            public void onFailure(Throwable replicaException) {
-                logger.trace("[{}] failure while performing [{}] on replica {}, request [{}]", replicaException, shard.shardId(), opType,
-                    shard, replicaRequest);
+            public void onFailure(Exception replicaException) {
+                logger.trace(
+                    (org.apache.logging.log4j.util.Supplier<?>) () -> new ParameterizedMessage(
+                        "[{}] failure while performing [{}] on replica {}, request [{}]",
+                        shard.shardId(),
+                        opType,
+                        shard,
+                        replicaRequest),
+                    replicaException);
                 if (ignoreReplicaException(replicaException)) {
                     decPendingAndFinishIfNeeded();
                 } else {
@@ -154,8 +209,10 @@ public class ReplicationOperation<Request extends ReplicationRequest<Request>, R
                     shardReplicaFailures.add(new ReplicationResponse.ShardInfo.Failure(
                         shard.shardId(), shard.currentNodeId(), replicaException, restStatus, false));
                     String message = String.format(Locale.ROOT, "failed to perform %s on replica %s", opType, shard);
-                    logger.warn("[{}] {}", replicaException, shard.shardId(), message);
-                    replicasProxy.failShard(shard, primary.routingEntry(), message, replicaException,
+                    logger.warn(
+                        (org.apache.logging.log4j.util.Supplier<?>)
+                            () -> new ParameterizedMessage("[{}] {}", shard.shardId(), message), replicaException);
+                    replicasProxy.failShard(shard, replicaRequest.primaryTerm(), message, replicaException,
                         ReplicationOperation.this::decPendingAndFinishIfNeeded,
                         ReplicationOperation.this::onPrimaryDemoted,
                         throwable -> decPendingAndFinishIfNeeded()
@@ -165,7 +222,7 @@ public class ReplicationOperation<Request extends ReplicationRequest<Request>, R
         });
     }
 
-    private void onPrimaryDemoted(Throwable demotionFailure) {
+    private void onPrimaryDemoted(Exception demotionFailure) {
         String primaryFail = String.format(Locale.ROOT,
             "primary shard [%s] was demoted while failing replica shard",
             primary.routingEntry());
@@ -175,47 +232,47 @@ public class ReplicationOperation<Request extends ReplicationRequest<Request>, R
     }
 
     /**
-     * checks whether we can perform a write based on the write consistency setting
-     * returns **null* if OK to proceed, or a string describing the reason to stop
+     * Checks whether we can perform a write based on the required active shard count setting.
+     * Returns **null* if OK to proceed, or a string describing the reason to stop
      */
-    String checkWriteConsistency() {
-        assert request.consistencyLevel() != WriteConsistencyLevel.DEFAULT : "consistency level should be set";
+    protected String checkActiveShardCount() {
         final ShardId shardId = primary.routingEntry().shardId();
+        final String indexName = shardId.getIndexName();
         final ClusterState state = clusterStateSupplier.get();
-        final WriteConsistencyLevel consistencyLevel = request.consistencyLevel();
-        final int sizeActive;
-        final int requiredNumber;
-        IndexRoutingTable indexRoutingTable = state.getRoutingTable().index(shardId.getIndexName());
-        if (indexRoutingTable != null) {
-            IndexShardRoutingTable shardRoutingTable = indexRoutingTable.shard(shardId.getId());
-            if (shardRoutingTable != null) {
-                sizeActive = shardRoutingTable.activeShards().size();
-                if (consistencyLevel == WriteConsistencyLevel.QUORUM && shardRoutingTable.getSize() > 2) {
-                    // only for more than 2 in the number of shardIt it makes sense, otherwise its 1 shard with 1 replica,
-                    // quorum is 1 (which is what it is initialized to)
-                    requiredNumber = (shardRoutingTable.getSize() / 2) + 1;
-                } else if (consistencyLevel == WriteConsistencyLevel.ALL) {
-                    requiredNumber = shardRoutingTable.getSize();
-                } else {
-                    requiredNumber = 1;
-                }
-            } else {
-                sizeActive = 0;
-                requiredNumber = 1;
-            }
-        } else {
-            sizeActive = 0;
-            requiredNumber = 1;
+        assert state != null : "replication operation must have access to the cluster state";
+        final ActiveShardCount waitForActiveShards = request.waitForActiveShards();
+        if (waitForActiveShards == ActiveShardCount.NONE) {
+            return null;  // not waiting for any shards
         }
-
-        if (sizeActive < requiredNumber) {
-            logger.trace("[{}] not enough active copies to meet write consistency of [{}] (have {}, needed {}), scheduling a retry." +
-                " op [{}], request [{}]", shardId, consistencyLevel, sizeActive, requiredNumber, opType, request);
-            return "Not enough active copies to meet write consistency of [" + consistencyLevel + "] (have " + sizeActive + ", needed "
-                + requiredNumber + ").";
-        } else {
+        IndexRoutingTable indexRoutingTable = state.getRoutingTable().index(indexName);
+        if (indexRoutingTable == null) {
+            logger.trace("[{}] index not found in the routing table", shardId);
+            return "Index " + indexName + " not found in the routing table";
+        }
+        IndexShardRoutingTable shardRoutingTable = indexRoutingTable.shard(shardId.getId());
+        if (shardRoutingTable == null) {
+            logger.trace("[{}] shard not found in the routing table", shardId);
+            return "Shard " + shardId + " not found in the routing table";
+        }
+        if (waitForActiveShards.enoughShardsActive(shardRoutingTable)) {
             return null;
+        } else {
+            final String resolvedShards = waitForActiveShards == ActiveShardCount.ALL ? Integer.toString(shardRoutingTable.shards().size())
+                                              : waitForActiveShards.toString();
+            logger.trace("[{}] not enough active copies to meet shard count of [{}] (have {}, needed {}), scheduling a retry. op [{}], " +
+                         "request [{}]", shardId, waitForActiveShards, shardRoutingTable.activeShards().size(),
+                         resolvedShards, opType, request);
+            return "Not enough active copies to meet shard count of [" + waitForActiveShards + "] (have " +
+                       shardRoutingTable.activeShards().size() + ", needed " + resolvedShards + ").";
         }
+    }
+
+    protected Set<String> getInSyncAllocationIds(ShardId shardId, ClusterState clusterState) {
+        IndexMetaData indexMetaData = clusterState.metaData().index(shardId.getIndex());
+        if (indexMetaData != null) {
+            return indexMetaData.inSyncAllocationIds(shardId.id());
+        }
+        return Collections.emptySet();
     }
 
     protected List<ShardRouting> getShards(ShardId shardId, ClusterState state) {
@@ -226,8 +283,8 @@ public class ReplicationOperation<Request extends ReplicationRequest<Request>, R
     }
 
     private void decPendingAndFinishIfNeeded() {
-        assert pendingShards.get() > 0;
-        if (pendingShards.decrementAndGet() == 0) {
+        assert pendingActions.get() > 0;
+        if (pendingActions.decrementAndGet() == 0) {
             finish();
         }
     }
@@ -241,19 +298,19 @@ public class ReplicationOperation<Request extends ReplicationRequest<Request>, R
                 failuresArray = new ReplicationResponse.ShardInfo.Failure[shardReplicaFailures.size()];
                 shardReplicaFailures.toArray(failuresArray);
             }
-            finalResponse.setShardInfo(new ReplicationResponse.ShardInfo(
+            primaryResult.setShardInfo(new ReplicationResponse.ShardInfo(
                     totalShards.get(),
                     successfulShards.get(),
                     failuresArray
                 )
             );
-            finalResponseListener.onResponse(finalResponse);
+            resultListener.onResponse(primaryResult);
         }
     }
 
-    private void finishAsFailed(Throwable throwable) {
+    private void finishAsFailed(Exception exception) {
         if (finished.compareAndSet(false, true)) {
-            finalResponseListener.onFailure(throwable);
+            resultListener.onFailure(exception);
         }
     }
 
@@ -261,7 +318,7 @@ public class ReplicationOperation<Request extends ReplicationRequest<Request>, R
     /**
      * Should an exception be ignored when the operation is performed on the replica.
      */
-    public static boolean ignoreReplicaException(Throwable e) {
+    public static boolean ignoreReplicaException(Exception e) {
         if (TransportActions.isShardNotAvailableException(e)) {
             return true;
         }
@@ -273,62 +330,105 @@ public class ReplicationOperation<Request extends ReplicationRequest<Request>, R
         return false;
     }
 
-    public static boolean isConflictException(Throwable e) {
-        Throwable cause = ExceptionsHelper.unwrapCause(e);
+    public static boolean isConflictException(Throwable t) {
+        final Throwable cause = ExceptionsHelper.unwrapCause(t);
         // on version conflict or document missing, it means
         // that a new change has crept into the replica, and it's fine
-        if (cause instanceof VersionConflictEngineException) {
-            return true;
-        }
-        return false;
+        return cause instanceof VersionConflictEngineException;
     }
 
 
-    interface Primary<Request extends ReplicationRequest<Request>, ReplicaRequest extends ReplicationRequest<ReplicaRequest>,
-        Response extends ReplicationResponse> {
-
-        /** routing entry for this primary */
-        ShardRouting routingEntry();
-
-        /** fail the primary, typically due to the fact that the operation has learned the primary has been demoted by the master */
-        void failShard(String message, Throwable throwable);
+    public interface Primary<
+                Request extends ReplicationRequest<Request>,
+                ReplicaRequest extends ReplicationRequest<ReplicaRequest>,
+                PrimaryResultT extends PrimaryResult<ReplicaRequest>
+            > {
 
         /**
-         * Performs the given request on this primary
-         *
-         * @return A tuple containing not null values, as first value the result of the primary operation and as second value
-         * the request to be executed on the replica shards.
+         * routing entry for this primary
          */
-        Tuple<Response, ReplicaRequest> perform(Request request) throws Exception;
+        ShardRouting routingEntry();
 
+        /**
+         * fail the primary, typically due to the fact that the operation has learned the primary has been demoted by the master
+         */
+        void failShard(String message, Exception exception);
+
+        /**
+         * Performs the given request on this primary. Yes, this returns as soon as it can with the request for the replicas and calls a
+         * listener when the primary request is completed. Yes, the primary request might complete before the method returns. Yes, it might
+         * also complete after. Deal with it.
+         *
+         * @param request the request to perform
+         * @return the request to send to the repicas
+         */
+        PrimaryResultT perform(Request request) throws Exception;
+
+
+        /**
+         * Notifies the primary of a local checkpoint for the given allocation.
+         *
+         * Note: The primary will use this information to advance the global checkpoint if possible.
+         *
+         * @param allocationId allocation ID of the shard corresponding to the supplied local checkpoint
+         * @param checkpoint the *local* checkpoint for the shard
+         */
+        void updateLocalCheckpointForShard(String allocationId, long checkpoint);
+
+        /** returns the local checkpoint of the primary shard */
+        long localCheckpoint();
     }
 
-    interface Replicas<ReplicaRequest extends ReplicationRequest<ReplicaRequest>> {
+    public interface Replicas<ReplicaRequest extends ReplicationRequest<ReplicaRequest>> {
 
         /**
          * performs the the given request on the specified replica
          *
-         * @param replica {@link ShardRouting} of the shard this request should be executed on
+         * @param replica        {@link ShardRouting} of the shard this request should be executed on
          * @param replicaRequest operation to peform
-         * @param listener a callback to call once the operation has been complicated, either successfully or with an error.
+         * @param listener       a callback to call once the operation has been complicated, either successfully or with an error.
          */
-        void performOn(ShardRouting replica, ReplicaRequest replicaRequest, ActionListener<TransportResponse.Empty> listener);
+        void performOn(ShardRouting replica, ReplicaRequest replicaRequest, ActionListener<ReplicaResponse> listener);
 
         /**
          * Fail the specified shard, removing it from the current set of active shards
-         * @param replica shard to fail
-         * @param primary the primary shard that requested the failure
-         * @param message a (short) description of the reason
-         * @param throwable the original exception which caused the ReplicationOperation to request the shard to be failed
-         * @param onSuccess a callback to call when the shard has been successfully removed from the active set.
+         * @param replica          shard to fail
+         * @param primaryTerm      the primary term of the primary shard when requesting the failure
+         * @param message          a (short) description of the reason
+         * @param exception        the original exception which caused the ReplicationOperation to request the shard to be failed
+         * @param onSuccess        a callback to call when the shard has been successfully removed from the active set.
          * @param onPrimaryDemoted a callback to call when the shard can not be failed because the current primary has been demoted
-         *                         by the master.
+*                         by the master.
          * @param onIgnoredFailure a callback to call when failing a shard has failed, but it that failure can be safely ignored and the
-         *                         replication operation can finish processing
-         *                         Note: this callback should be used in extreme situations, typically node shutdown.
          */
-        void failShard(ShardRouting replica, ShardRouting primary, String message, Throwable throwable, Runnable onSuccess,
-                       Consumer<Throwable> onPrimaryDemoted, Consumer<Throwable> onIgnoredFailure);
+        void failShard(ShardRouting replica, long primaryTerm, String message, Exception exception, Runnable onSuccess,
+                       Consumer<Exception> onPrimaryDemoted, Consumer<Exception> onIgnoredFailure);
+
+        /**
+         * Marks shard copy as stale, removing its allocation id from the set of in-sync allocation ids.
+         *
+         * @param shardId          shard id
+         * @param allocationId     allocation id to remove from the set of in-sync allocation ids
+         * @param primaryTerm      the primary term of the primary shard when requesting the failure
+         * @param onSuccess        a callback to call when the allocation id has been successfully removed from the in-sync set.
+         * @param onPrimaryDemoted a callback to call when the request failed because the current primary was already demoted
+         *                         by the master.
+         * @param onIgnoredFailure a callback to call when the request failed, but the failure can be safely ignored.
+         */
+        void markShardCopyAsStale(ShardId shardId, String allocationId, long primaryTerm, Runnable onSuccess,
+                                  Consumer<Exception> onPrimaryDemoted, Consumer<Exception> onIgnoredFailure);
+    }
+
+    /**
+     * An interface to encapsulate the metadata needed from replica shards when they respond to operations performed on them
+     */
+    public interface ReplicaResponse {
+
+        /** the local check point for the shard. see {@link org.elasticsearch.index.seqno.SequenceNumbersService#getLocalCheckpoint()} */
+        long localCheckpoint();
+
+        /** the allocation id of the replica shard */
+        String allocationId();
     }
 
     public static class RetryOnPrimaryException extends ElasticsearchException {
@@ -344,5 +444,16 @@ public class ReplicationOperation<Request extends ReplicationRequest<Request>, R
         public RetryOnPrimaryException(StreamInput in) throws IOException {
             super(in);
         }
+    }
+
+    public interface PrimaryResult<R extends ReplicationRequest<R>> {
+
+        /**
+         * @return null if no operation needs to be sent to a replica
+         * (for example when the operation failed on the primary due to a parsing exception)
+         */
+        @Nullable R replicaRequest();
+
+        void setShardInfo(ReplicationResponse.ShardInfo shardInfo);
     }
 }

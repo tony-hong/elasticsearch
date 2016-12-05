@@ -22,6 +22,7 @@ import org.elasticsearch.action.Action;
 import org.elasticsearch.action.ActionRequestBuilder;
 import org.elasticsearch.client.ElasticsearchClient;
 import org.elasticsearch.common.unit.TimeValue;
+import org.elasticsearch.tasks.TaskId;
 
 /**
  * Builder for task-based requests
@@ -36,9 +37,18 @@ public class TasksRequestBuilder<
         super(client, action, request);
     }
 
+    /**
+     * Set the task to lookup.
+     */
+    @SuppressWarnings("unchecked")
+    public final RequestBuilder setTaskId(TaskId taskId) {
+        request.setTaskId(taskId);
+        return (RequestBuilder) this;
+    }
+
     @SuppressWarnings("unchecked")
     public final RequestBuilder setNodesIds(String... nodesIds) {
-        request.setNodesIds(nodesIds);
+        request.setNodes(nodesIds);
         return (RequestBuilder) this;
     }
 
@@ -51,6 +61,15 @@ public class TasksRequestBuilder<
     @SuppressWarnings("unchecked")
     public final RequestBuilder setTimeout(TimeValue timeout) {
         request.setTimeout(timeout);
+        return (RequestBuilder) this;
+    }
+
+    /**
+     * Match all children of the provided task. 
+     */
+    @SuppressWarnings("unchecked")
+    public final RequestBuilder setParentTaskId(TaskId taskId) {
+        request.setParentTaskId(taskId);
         return (RequestBuilder) this;
     }
 }

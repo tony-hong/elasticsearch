@@ -27,6 +27,8 @@ import org.elasticsearch.cluster.Diffable;
 import org.elasticsearch.cluster.DiffableUtils;
 import org.elasticsearch.cluster.metadata.IndexMetaData;
 import org.elasticsearch.cluster.metadata.MetaData;
+import org.elasticsearch.cluster.routing.RecoverySource.SnapshotRecoverySource;
+import org.elasticsearch.common.Nullable;
 import org.elasticsearch.common.collect.ImmutableOpenMap;
 import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.io.stream.StreamOutput;
@@ -84,6 +86,11 @@ public class RoutingTable implements Iterable<IndexRoutingTable>, Diffable<Routi
 
     public boolean hasIndex(String index) {
         return indicesRouting.containsKey(index);
+    }
+
+    public boolean hasIndex(Index index) {
+        IndexRoutingTable indexRouting = index(index.getName());
+        return indexRouting != null && indexRouting.getIndex().equals(index);
     }
 
     public IndexRoutingTable index(String index) {
@@ -144,6 +151,26 @@ public class RoutingTable implements Iterable<IndexRoutingTable>, Diffable<Routi
             .flatMap(irt -> Optional.ofNullable(irt.shard(shardId.getId())))
             .orElse(null);
     }
+
+    @Nullable
+    public ShardRouting getByAllocationId(ShardId shardId, String allocationId) {
+        IndexShardRoutingTable shardRoutingTable = shardRoutingTableOrNull(shardId);
+        if (shardRoutingTable == null) {
+            return null;
+        }
+        for (ShardRouting shardRouting : shardRoutingTable.assignedShards()) {
+            if (shardRouting.allocationId().getId().equals(allocationId)) {
+                return shardRouting;
+            }
+            if (shardRouting.relocating()) {
+                if (shardRouting.getTargetRelocatingShard().allocationId().getId().equals(allocationId)) {
+                    return shardRouting.getTargetRelocatingShard();
+                }
+            }
+        }
+        return null;
+    }
+
 
     public boolean validate(MetaData metaData) {
         for (IndexRoutingTable indexRoutingTable : this) {
@@ -245,7 +272,7 @@ public class RoutingTable implements Iterable<IndexRoutingTable>, Diffable<Routi
                     if (predicate.test(shardRouting)) {
                         set.add(shardRouting.shardsIt());
                         if (includeRelocationTargets && shardRouting.relocating()) {
-                            set.add(new PlainShardIterator(shardRouting.shardId(), Collections.singletonList(shardRouting.buildTargetRelocatingShard())));
+                            set.add(new PlainShardIterator(shardRouting.shardId(), Collections.singletonList(shardRouting.getTargetRelocatingShard())));
                         }
                     } else if (includeEmpty) { // we need this for counting properly, just make it an empty one
                         set.add(new PlainShardIterator(shardRouting.shardId(), Collections.<ShardRouting>emptyList()));
@@ -278,7 +305,7 @@ public class RoutingTable implements Iterable<IndexRoutingTable>, Diffable<Routi
                     if (predicate.test(shardRouting)) {
                         shards.add(shardRouting);
                         if (includeRelocationTargets && shardRouting.relocating()) {
-                            shards.add(shardRouting.buildTargetRelocatingShard());
+                            shards.add(shardRouting.getTargetRelocatingShard());
                         }
                     }
                 }
@@ -404,9 +431,9 @@ public class RoutingTable implements Iterable<IndexRoutingTable>, Diffable<Routi
             }
         }
 
-        public Builder updateNodes(RoutingNodes routingNodes) {
+        public Builder updateNodes(long version, RoutingNodes routingNodes) {
             // this is being called without pre initializing the routing table, so we must copy over the version as well
-            this.version = routingNodes.routingTable().version();
+            this.version = version;
 
             Map<String, IndexRoutingTable.Builder> indexRoutingTableBuilders = new HashMap<>();
             for (RoutingNode routingNode : routingNodes) {
@@ -422,8 +449,7 @@ public class RoutingTable implements Iterable<IndexRoutingTable>, Diffable<Routi
                         indexRoutingTableBuilders.put(index.getName(), indexBuilder);
                     }
 
-                    IndexShardRoutingTable refData = routingNodes.routingTable().index(shardRoutingEntry.index().getName()).shard(shardRoutingEntry.id());
-                    indexBuilder.addShard(refData, shardRoutingEntry);
+                    indexBuilder.addShard(shardRoutingEntry);
                 }
             }
 
@@ -436,8 +462,7 @@ public class RoutingTable implements Iterable<IndexRoutingTable>, Diffable<Routi
                     indexBuilder = new IndexRoutingTable.Builder(index);
                     indexRoutingTableBuilders.put(index.getName(), indexBuilder);
                 }
-                IndexShardRoutingTable refData = routingNodes.routingTable().index(shardRoutingEntry.index().getName()).shard(shardRoutingEntry.id());
-                indexBuilder.addShard(refData, shardRoutingEntry);
+                indexBuilder.addShard(shardRoutingEntry);
             }
 
             for (IndexRoutingTable.Builder indexBuilder : indexRoutingTableBuilders.values()) {
@@ -521,16 +546,16 @@ public class RoutingTable implements Iterable<IndexRoutingTable>, Diffable<Routi
             return this;
         }
 
-        public Builder addAsRestore(IndexMetaData indexMetaData, RestoreSource restoreSource) {
+        public Builder addAsRestore(IndexMetaData indexMetaData, SnapshotRecoverySource recoverySource) {
             IndexRoutingTable.Builder indexRoutingBuilder = new IndexRoutingTable.Builder(indexMetaData.getIndex())
-                    .initializeAsRestore(indexMetaData, restoreSource);
+                    .initializeAsRestore(indexMetaData, recoverySource);
             add(indexRoutingBuilder);
             return this;
         }
 
-        public Builder addAsNewRestore(IndexMetaData indexMetaData, RestoreSource restoreSource, IntSet ignoreShards) {
+        public Builder addAsNewRestore(IndexMetaData indexMetaData, SnapshotRecoverySource recoverySource, IntSet ignoreShards) {
             IndexRoutingTable.Builder indexRoutingBuilder = new IndexRoutingTable.Builder(indexMetaData.getIndex())
-                    .initializeAsNewRestore(indexMetaData, restoreSource, ignoreShards);
+                    .initializeAsNewRestore(indexMetaData, recoverySource, ignoreShards);
             add(indexRoutingBuilder);
             return this;
         }
@@ -588,7 +613,8 @@ public class RoutingTable implements Iterable<IndexRoutingTable>, Diffable<Routi
         }
     }
 
-    public String prettyPrint() {
+    @Override
+    public String toString() {
         StringBuilder sb = new StringBuilder("routing_table (version ").append(version).append("):\n");
         for (ObjectObjectCursor<String, IndexRoutingTable> entry : indicesRouting) {
             sb.append(entry.value.prettyPrint()).append('\n');
